@@ -1,0 +1,104 @@
+[project]
+name = "easier-sam2"
+version = "0.1.0"
+description = "A simple, high-level wrapper around Meta's SAM2 for image segmentation and video object tracking."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "easier-sam2 contributors" }]
+keywords = ["sam2", "segmentation", "tracking", "computer-vision", "video"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+dependencies = [
+    "SAM-2 @ git+https://github.com/facebookresearch/sam2.git",
+    "numpy>=1.24",
+    "Pillow>=9.0",
+    "opencv-python>=4.7",
+    "pycocotools>=2.0",
+    "huggingface-hub>=0.20",
+]
+
+[project.optional-dependencies]
+viz = ["matplotlib>=3.5"]
+notebook = ["jupyterlab>=4.0", "ipywidgets>=8.0", "ipympl>=0.9"]
+demo = ["gradio>=4.0"]
+all = ["easier-sam2[viz,notebook,demo]"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/easier_sam2"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "TCH",   # flake8-type-checking
+    "RUF",   # ruff-specific rules
+    "D",     # pydocstyle
+    "ANN",   # flake8-annotations
+    "S",     # flake8-bandit (security)
+    "C4",    # flake8-comprehensions
+    "PT",    # flake8-pytest-style
+]
+ignore = [
+    "D100",   # missing module docstring
+    "D104",   # missing public package docstring
+    "D203",   # no-blank-line-before-class (conflicts with D211)
+    "D213",   # multi-line-summary-second-line (conflicts with D212)
+    "ANN101", # missing type annotation for self
+    "ANN102", # missing type annotation for cls
+    "ANN401", # dynamically typed expressions (typing.Any)
+    "S101",   # use of assert
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "ANN", "S"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.0",
+    "pytest>=7.0",
+    "ruff>=0.8",
+]
