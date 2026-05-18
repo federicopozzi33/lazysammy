@@ -1,4 +1,4 @@
-"""Gradio demo for easier-sam2.
+"""Gradio demo for lazysammy2.
 
 Launch with::
 
@@ -20,7 +20,7 @@ import cv2
 import gradio as gr
 import numpy as np
 
-from easier_sam2 import SAM2, draw_masks_on_image, extract_frames, save_video_overlay_mp4
+from lazysammy2 import SAM2, draw_masks_on_image, extract_frames, save_video_overlay_mp4
 
 logger = logging.getLogger(__name__)
 
@@ -418,12 +418,12 @@ def _render_mode_instruction(mode: str) -> str:
 def build_app() -> gr.Blocks:
     """Construct and return the Gradio Blocks app."""
 
-    with gr.Blocks(title="easier-sam2 Demo", theme=gr.themes.Soft(), css=_CSS) as app:
+    with gr.Blocks(title="lazysammy2 Demo", theme=gr.themes.Soft(), css=_CSS) as app:
         gr.Markdown(
-            "# 🎯 easier-sam2 Demo\n"
+            "# 🎯 lazysammy2 Demo\n"
             "Interactive segmentation & video tracking powered by "
             "[SAM 2](https://github.com/facebookresearch/sam2) via "
-            "[easier-sam2](https://github.com/fpozzi/easier-sam2)."
+            "[lazysammy2](https://github.com/fpozzi/lazysammy2)."
         )
 
         model_size = gr.Dropdown(

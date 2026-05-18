@@ -1,11 +1,12 @@
-"""Core type definitions for easier-sam2."""
+"""Core type definitions for lazysammy2."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional, Sequence, Union
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -65,14 +66,14 @@ CHECKPOINT_URLS: dict[ModelSize, str] = {
 
 
 # ---- Convenience type aliases ----
-PointCoords = Union[Sequence[Sequence[float]], npt.NDArray[np.floating[Any]]]
-PointLabels = Union[Sequence[int], npt.NDArray[np.integer[Any]]]
-BoundingBox = Union[
-    Sequence[float],  # [x1, y1, x2, y2]
-    npt.NDArray[np.floating[Any]],
-]
-MaskInput = npt.NDArray[np.uint8]  # H×W binary mask
-ImageInput = Union[npt.NDArray[np.uint8], "PIL.Image.Image"]  # type: ignore[name-defined]
+PointCoords = Sequence[Sequence[float]] | npt.NDArray[np.floating[Any]]
+PointLabels = Sequence[int] | npt.NDArray[np.integer[Any]]
+BoundingBox = (
+    Sequence[float]  # [x1, y1, x2, y2]
+    | npt.NDArray[np.floating[Any]]
+)
+MaskInput = npt.NDArray[np.uint8]  # H x W binary mask
+ImageInput = npt.NDArray[np.uint8]  # H x W x 3 RGB array
 
 
 @dataclass
@@ -80,20 +81,35 @@ class Mask:
     """A single segmentation mask with metadata.
 
     Attributes:
-        mask: Binary mask array of shape ``(H, W)`` with dtype ``bool``.
+        data: Binary mask array of shape ``(H, W)`` with dtype ``bool``.
         score: Model-predicted IoU quality score in ``[0, 1]``.
         logits: Low-resolution logit mask (useful for iterative refinement).
         area: Pixel area of the mask.
     """
 
-    mask: npt.NDArray[np.bool_]
+    data: npt.NDArray[np.bool_]
     score: float
-    logits: Optional[npt.NDArray[np.floating[Any]]] = None
-    area: Optional[int] = None
+    logits: npt.NDArray[np.floating[Any]] | None = None
+    area: int | None = None
 
     def __post_init__(self) -> None:
         if self.area is None:
-            self.area = int(self.mask.sum())
+            self.area = int(self.data.sum())
+
+    def numpy(self) -> npt.NDArray[np.bool_]:
+        """Return the mask as a boolean numpy array."""
+        return self.data
+
+    def as_uint8(self) -> npt.NDArray[np.uint8]:
+        """Return the mask as a uint8 array (0 or 255)."""
+        return self.data.astype(np.uint8) * 255
+
+    def save(self, path: str | Path) -> None:
+        """Save the mask as a PNG file."""
+        import cv2
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(path), self.as_uint8())
 
 
 @dataclass
@@ -102,11 +118,14 @@ class ImagePrediction:
 
     Attributes:
         masks: List of predicted :class:`Mask` objects.
-        image_shape: ``(H, W)`` of the original image.
+        image_shape: ``(H, W)`` of the original image (optional).
     """
 
     masks: list[Mask]
-    image_shape: tuple[int, int]
+    image_shape: tuple[int, int] | None = None
+
+    def __len__(self) -> int:
+        return len(self.masks)
 
     # -- convenience helpers ------------------------------------------------
 
@@ -117,7 +136,7 @@ class ImagePrediction:
 
     def numpy(self) -> npt.NDArray[np.bool_]:
         """Stack all masks into a ``(N, H, W)`` boolean array."""
-        return np.stack([m.mask for m in self.masks])
+        return np.stack([m.data for m in self.masks])
 
     def as_uint8(self) -> npt.NDArray[np.uint8]:
         """Stack all masks into a ``(N, H, W)`` uint8 array (0/255)."""
@@ -129,22 +148,22 @@ class AutoMask:
     """A single mask from automatic mask generation.
 
     Attributes:
-        mask: Binary mask ``(H, W)``.
+        data: Binary mask ``(H, W)``.
+        score: Model prediction of mask quality.
         area: Pixel area.
         bbox: Bounding box in ``[x, y, w, h]`` format.
-        predicted_iou: Model prediction of mask quality.
         stability_score: Stability of the mask under threshold changes.
-        point_coords: Point coordinates used to generate this mask.
         crop_box: The crop region used, in ``[x, y, w, h]`` format.
+        point_coords: Point coordinates used to generate this mask.
     """
 
-    mask: npt.NDArray[np.bool_]
+    data: npt.NDArray[np.bool_]
+    score: float
     area: int
     bbox: list[float]
-    predicted_iou: float
     stability_score: float
-    point_coords: list[list[float]]
     crop_box: list[float]
+    point_coords: list[list[float]] | None = None
 
 
 @dataclass
@@ -153,17 +172,18 @@ class AutoMaskResult:
 
     Attributes:
         masks: List of :class:`AutoMask` objects sorted by area (largest first).
-        image_shape: ``(H, W)`` of the source image.
+        image_shape: ``(H, W)`` of the source image (optional).
     """
 
     masks: list[AutoMask]
-    image_shape: tuple[int, int]
+    image_shape: tuple[int, int] | None = None
 
     def numpy(self) -> npt.NDArray[np.bool_]:
         """Stack all masks into ``(N, H, W)``."""
         if not self.masks:
-            return np.zeros((0, *self.image_shape), dtype=bool)
-        return np.stack([m.mask for m in self.masks])
+            shape = self.image_shape or (0, 0)
+            return np.zeros((0, *shape), dtype=bool)
+        return np.stack([m.data for m in self.masks])
 
     def filter_by_area(self, min_area: int = 0, max_area: int | None = None) -> AutoMaskResult:
         """Return a new result keeping only masks within the area range."""
@@ -176,7 +196,7 @@ class AutoMaskResult:
 
     def filter_by_iou(self, min_iou: float = 0.0) -> AutoMaskResult:
         """Return a new result keeping only masks above the IoU threshold."""
-        filtered = [m for m in self.masks if m.predicted_iou >= min_iou]
+        filtered = [m for m in self.masks if m.score >= min_iou]
         return AutoMaskResult(masks=filtered, image_shape=self.image_shape)
 
 
@@ -186,15 +206,16 @@ class FrameMasks:
 
     Attributes:
         frame_idx: Zero-based frame index.
-        object_ids: Object ids corresponding to each mask (length ``N``).
-        masks: Binary masks of shape ``(N, H, W)``.
-        scores: Raw mask logits/scores per object of shape ``(N, 1, H, W)``.
+        masks: Mapping from object id to binary mask ``(H, W)``.
     """
 
     frame_idx: int
-    object_ids: list[int]
-    masks: npt.NDArray[np.bool_]
-    scores: Optional[npt.NDArray[np.floating[Any]]] = None
+    masks: dict[int, npt.NDArray[np.bool_]]
+
+    @property
+    def object_ids(self) -> list[int]:
+        """Return sorted list of object ids for this frame."""
+        return sorted(self.masks.keys())
 
 
 @dataclass
@@ -202,27 +223,31 @@ class VideoResults:
     """Full propagation results for a video.
 
     Attributes:
-        frame_masks: Mapping from frame index to :class:`FrameMasks`.
+        frames: List of :class:`FrameMasks`, one per tracked frame.
         video_dir: Path to the source frame directory.
         num_frames: Total number of frames in the video.
     """
 
-    frame_masks: dict[int, FrameMasks] = field(default_factory=dict)
-    video_dir: Optional[Path] = None
+    frames: list[FrameMasks] = field(default_factory=list)
+    video_dir: Path | None = None
     num_frames: int = 0
+
+    # Internal index for fast frame lookup (populated lazily)
+    def _frame_index(self) -> dict[int, FrameMasks]:
+        return {fm.frame_idx: fm for fm in self.frames}
 
     # -- iteration helpers --------------------------------------------------
 
     def __iter__(self):  # noqa: ANN204
-        """Iterate over frame masks sorted by frame index."""
-        for idx in sorted(self.frame_masks):
-            yield self.frame_masks[idx]
+        """Iterate over ``(frame_idx, FrameMasks)`` pairs sorted by frame index."""
+        for fm in sorted(self.frames, key=lambda f: f.frame_idx):
+            yield fm.frame_idx, fm
 
     def __len__(self) -> int:
-        return len(self.frame_masks)
+        return len(self.frames)
 
     def __getitem__(self, frame_idx: int) -> FrameMasks:
-        return self.frame_masks[frame_idx]
+        return self._frame_index()[frame_idx]
 
     def get_object_masks(self, obj_id: int) -> dict[int, npt.NDArray[np.bool_]]:
         """Get all masks for a specific object across frames.
@@ -231,16 +256,15 @@ class VideoResults:
             Mapping from ``frame_idx`` to the boolean mask for the object.
         """
         result: dict[int, npt.NDArray[np.bool_]] = {}
-        for frame_idx, fm in self.frame_masks.items():
-            if obj_id in fm.object_ids:
-                idx = fm.object_ids.index(obj_id)
-                result[frame_idx] = fm.masks[idx]
+        for fm in self.frames:
+            if obj_id in fm.masks:
+                result[fm.frame_idx] = fm.masks[obj_id]
         return result
 
     @property
-    def object_ids(self) -> list[int]:
+    def object_ids(self) -> set[int]:
         """All unique object ids across all frames."""
         ids: set[int] = set()
-        for fm in self.frame_masks.values():
-            ids.update(fm.object_ids)
-        return sorted(ids)
+        for fm in self.frames:
+            ids.update(fm.masks.keys())
+        return ids

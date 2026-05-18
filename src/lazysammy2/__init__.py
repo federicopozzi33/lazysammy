@@ -1,8 +1,8 @@
-"""easier-sam2 – A simplified wrapper around Meta's SAM 2.
+"""lazysammy2 - A simplified wrapper around Meta's SAM 2.
 
 Quick start::
 
-    from easier_sam2 import SAM2
+    from lazysammy2 import SAM2
 
     sam = SAM2("large")
 
@@ -22,11 +22,11 @@ Quick start::
 
 from __future__ import annotations
 
-from easier_sam2.auto_mask import AutoSegmenter
-from easier_sam2.image import ImageSegmenter
-from easier_sam2.prompts import PromptPicker, pick_box_on_image, pick_points_on_image, preview_frame
-from easier_sam2.sam2 import SAM2
-from easier_sam2.types import (
+from lazysammy2.auto_mask import AutoSegmenter
+from lazysammy2.image import ImageSegmenter
+from lazysammy2.prompts import PromptPicker, pick_box_on_image, pick_points_on_image, preview_frame
+from lazysammy2.sam2 import SAM2
+from lazysammy2.types import (
     AutoMask,
     AutoMaskResult,
     FrameMasks,
@@ -35,9 +35,9 @@ from easier_sam2.types import (
     ModelSize,
     VideoResults,
 )
-from easier_sam2.utils import extract_frames
-from easier_sam2.video import VideoSession, VideoTracker
-from easier_sam2.visualization import (
+from lazysammy2.utils import extract_frames
+from lazysammy2.video import VideoSession, VideoTracker
+from lazysammy2.visualization import (
     draw_box_on_image,
     draw_masks_on_image,
     draw_points_on_image,
@@ -49,35 +49,29 @@ from easier_sam2.visualization import (
 )
 
 __all__ = [
-    # Main facade
     "SAM2",
-    # Sub-components
-    "ImageSegmenter",
-    "VideoTracker",
-    "VideoSession",
-    "AutoSegmenter",
-    # Interactive prompts
-    "PromptPicker",
-    "pick_points_on_image",
-    "pick_box_on_image",
-    "preview_frame",
-    # Utilities
-    "extract_frames",
-    # Result types
-    "Mask",
-    "ImagePrediction",
     "AutoMask",
     "AutoMaskResult",
+    "AutoSegmenter",
     "FrameMasks",
-    "VideoResults",
+    "ImagePrediction",
+    "ImageSegmenter",
+    "Mask",
     "ModelSize",
-    # Visualization
+    "PromptPicker",
+    "VideoResults",
+    "VideoSession",
+    "VideoTracker",
+    "draw_box_on_image",
     "draw_masks_on_image",
     "draw_points_on_image",
-    "draw_box_on_image",
-    "show_image_prediction",
-    "show_auto_masks",
-    "show_video_frame",
+    "extract_frames",
+    "pick_box_on_image",
+    "pick_points_on_image",
+    "preview_frame",
     "save_video_overlay",
     "save_video_overlay_mp4",
+    "show_auto_masks",
+    "show_image_prediction",
+    "show_video_frame",
 ]

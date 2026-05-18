@@ -10,8 +10,8 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from easier_sam2.types import AutoMask, AutoMaskResult, ModelSize
-from easier_sam2.utils import (
+from lazysammy2.types import AutoMask, AutoMaskResult, ModelSize
+from lazysammy2.utils import (
     auto_detect_device,
     get_autocast_dtype,
     load_image,
@@ -62,7 +62,7 @@ class AutoSegmenter:
             use_m2m: Enable mask-to-mask refinement step.
             **kwargs: Extra arguments forwarded to the generator constructor.
         """
-        from easier_sam2.models import load_auto_mask_generator
+        from lazysammy2.models import load_auto_mask_generator
 
         self._generator = load_auto_mask_generator(
             model_size,
@@ -75,7 +75,7 @@ class AutoSegmenter:
             use_m2m=use_m2m,
             **kwargs,
         )
-        self._device = auto_detect_device(device)
+        self._device = torch.device(auto_detect_device(device))
         self._dtype = get_autocast_dtype(self._device)
 
     # ------------------------------------------------------------------
@@ -101,10 +101,14 @@ class AutoSegmenter:
 
         masks = [
             AutoMask(
-                mask=ann["segmentation"].astype(bool) if isinstance(ann["segmentation"], np.ndarray) else np.zeros(img.shape[:2], dtype=bool),
+                data=(
+                    ann["segmentation"].astype(bool)
+                    if isinstance(ann["segmentation"], np.ndarray)
+                    else np.zeros(img.shape[:2], dtype=bool)
+                ),
+                score=ann["predicted_iou"],
                 area=ann["area"],
                 bbox=ann["bbox"],
-                predicted_iou=ann["predicted_iou"],
                 stability_score=ann["stability_score"],
                 point_coords=ann["point_coords"],
                 crop_box=ann["crop_box"],

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from easier_sam2.sam2 import SAM2
+from lazysammy2.sam2 import SAM2
 
 
 class TestSAM2Init:

@@ -10,7 +10,7 @@ inside Jupyter notebooks.
 - ``pick_points_on_image()`` and ``pick_box_on_image()`` require an
   **interactive** backend to receive mouse clicks.  Use one of:
 
-  - ``%matplotlib widget`` (recommended — needs ``ipympl``)
+  - ``%matplotlib widget`` (recommended - needs ``ipympl``)
   - ``%matplotlib notebook`` (classic Jupyter only)
 
 The interactive figures **close automatically** when you finish:
@@ -23,7 +23,7 @@ Typical usage::
 
     %matplotlib widget          # <-- required for interactive clicking
 
-    from easier_sam2.prompts import PromptPicker
+    from lazysammy2.prompts import PromptPicker
 
     picker = PromptPicker(session)
 
@@ -42,16 +42,15 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any
 
-import cv2
 import numpy as np
 import numpy.typing as npt
 
-from easier_sam2.utils import list_frame_files, load_image
+from lazysammy2.utils import list_frame_files, load_image
 
 if TYPE_CHECKING:
-    from easier_sam2.video import VideoSession
+    from lazysammy2.video import VideoSession
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +89,7 @@ def preview_frame(
     Useful for visually identifying coordinates before adding prompts.
 
     Args:
-        video_dir: Directory of frames (or video file path – frames must
+        video_dir: Directory of frames (or video file path - frames must
             already be extracted).
         frame_idx: Zero-based index of the frame to show.
         figsize: Matplotlib figure size.
@@ -104,7 +103,7 @@ def preview_frame(
 
     frames = list_frame_files(video_dir)
     if frame_idx >= len(frames):
-        msg = f"frame_idx {frame_idx} out of range (0–{len(frames) - 1})"
+        msg = f"frame_idx {frame_idx} out of range (0-{len(frames) - 1})"
         raise IndexError(msg)
 
     img = load_image(frames[frame_idx])
@@ -113,7 +112,7 @@ def preview_frame(
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     ax.imshow(img)
     ax.set_title(
-        f"Frame {frame_idx}  —  {w}×{h}  —  hover to read (x, y)",
+        f"Frame {frame_idx}  |  {w}x{h}  |  hover to read (x, y)",
         fontsize=11,
     )
 
@@ -163,7 +162,7 @@ def pick_points_on_image(
         title: Custom window title.
 
     Returns:
-        ``(points, labels)`` – lists ready to pass to ``add_points()``.
+        ``(points, labels)`` - lists ready to pass to ``add_points()``.
     """
     import matplotlib.pyplot as plt
 
@@ -235,7 +234,7 @@ def pick_box_on_image(
 ) -> list[float]:
     """Interactively draw a bounding box on an image.
 
-    Click two corners — the figure closes automatically after the second
+    Click two corners - the figure closes automatically after the second
     click.  Press **q** or **Esc** to cancel.
 
     Args:
@@ -343,7 +342,7 @@ class PromptPicker:
     def get_frame(self, frame_idx: int) -> npt.NDArray[np.uint8]:
         """Load frame *frame_idx* as an RGB numpy array."""
         if frame_idx < 0 or frame_idx >= len(self._frame_files):
-            msg = f"frame_idx {frame_idx} out of range (0–{len(self._frame_files) - 1})"
+            msg = f"frame_idx {frame_idx} out of range (0-{len(self._frame_files) - 1})"
             raise IndexError(msg)
         return load_image(self._frame_files[frame_idx])
 
@@ -365,7 +364,7 @@ class PromptPicker:
         """
         img = self.get_frame(frame_idx)
         return pick_points_on_image(
-            img, n=n, title=f"Frame {frame_idx} — pick points", **kwargs,
+            img, n=n, title=f"Frame {frame_idx} - pick points", **kwargs,
         )
 
     def pick_box(
@@ -379,7 +378,7 @@ class PromptPicker:
         """
         img = self.get_frame(frame_idx)
         return pick_box_on_image(
-            img, title=f"Frame {frame_idx} — draw box", **kwargs,
+            img, title=f"Frame {frame_idx} - draw box", **kwargs,
         )
 
     def add_points_interactive(
@@ -404,11 +403,11 @@ class PromptPicker:
         Returns:
             ``(points, labels)`` that were added.
         """
-        from easier_sam2.visualization import show_video_frame
+        from lazysammy2.visualization import show_video_frame
 
         points, labels = self.pick_points(frame_idx, n=n, **kwargs)
         if not points:
-            logger.warning("No points selected — nothing added.")
+            logger.warning("No points selected - nothing added.")
             return points, labels
 
         fm = self._session.add_points(
@@ -443,11 +442,11 @@ class PromptPicker:
         Returns:
             ``[x1, y1, x2, y2]`` that was added.
         """
-        from easier_sam2.visualization import show_video_frame
+        from lazysammy2.visualization import show_video_frame
 
         box = self.pick_box(frame_idx, **kwargs)
         if not box:
-            logger.warning("No box drawn — nothing added.")
+            logger.warning("No box drawn - nothing added.")
             return box
 
         fm = self._session.add_box(

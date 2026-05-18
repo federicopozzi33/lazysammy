@@ -1,4 +1,4 @@
-"""Shared test fixtures for easier-sam2."""
+"""Shared test fixtures for lazysammy2."""
 
 from __future__ import annotations
 

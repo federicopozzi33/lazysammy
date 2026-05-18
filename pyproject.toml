@@ -1,11 +1,11 @@
 [project]
-name = "easier-sam2"
+name = "lazysammy2"
 version = "0.1.0"
 description = "A simple, high-level wrapper around Meta's SAM2 for image segmentation and video object tracking."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
-authors = [{ name = "easier-sam2 contributors" }]
+authors = [{ name = "lazysammy2 contributors" }]
 keywords = ["sam2", "segmentation", "tracking", "computer-vision", "video"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -32,7 +32,7 @@ dependencies = [
 viz = ["matplotlib>=3.5"]
 notebook = ["jupyterlab>=4.0", "ipywidgets>=8.0", "ipympl>=0.9"]
 demo = ["gradio>=4.0"]
-all = ["easier-sam2[viz,notebook,demo]"]
+all = ["lazysammy2[viz,notebook,demo]"]
 
 [build-system]
 requires = ["hatchling"]
@@ -42,7 +42,7 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/easier_sam2"]
+packages = ["src/lazysammy2"]
 
 [tool.ruff]
 target-version = "py310"
@@ -70,12 +70,17 @@ select = [
 ignore = [
     "D100",   # missing module docstring
     "D104",   # missing public package docstring
+    "D105",   # missing docstring in magic method
+    "D107",   # missing docstring in __init__
     "D203",   # no-blank-line-before-class (conflicts with D211)
     "D213",   # multi-line-summary-second-line (conflicts with D212)
-    "ANN101", # missing type annotation for self
-    "ANN102", # missing type annotation for cls
+    "D417",   # missing argument descriptions for **kwargs
     "ANN401", # dynamically typed expressions (typing.Any)
+    "E402",   # module level import not at top of file (needed for warning filters)
     "S101",   # use of assert
+    "TC001",  # move application import into TYPE_CHECKING block
+    "TC002",  # move third-party import into TYPE_CHECKING block
+    "TC003",  # move stdlib import into TYPE_CHECKING block
 ]
 
 [tool.ruff.lint.pydocstyle]

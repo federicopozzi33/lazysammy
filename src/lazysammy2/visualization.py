@@ -1,20 +1,20 @@
 """Visualisation helpers for masks, bounding boxes, and tracking results.
 
-Requires ``matplotlib`` (install via ``pip install easier-sam2[viz]``).
+Requires ``matplotlib`` (install via ``pip install lazysammy2[viz]``).
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any
 
 import cv2
 import numpy as np
 import numpy.typing as npt
 
-from easier_sam2.types import AutoMaskResult, FrameMasks, ImagePrediction, VideoResults
-from easier_sam2.utils import load_image, masks_to_colored_overlay
-
+from lazysammy2.types import AutoMaskResult, FrameMasks, ImagePrediction, VideoResults
+from lazysammy2.utils import load_image, masks_to_colored_overlay
 
 # ---------------------------------------------------------------------------
 # Colour palette
@@ -109,7 +109,7 @@ def draw_points_on_image(
         Image with drawn points.
     """
     out = image.copy()
-    for pt, lab in zip(points, labels):
+    for pt, lab in zip(points, labels, strict=False):
         color = fg_color if int(lab) == 1 else bg_color
         cv2.circle(out, (int(pt[0]), int(pt[1])), radius, color, -1)
         cv2.circle(out, (int(pt[0]), int(pt[1])), radius, (255, 255, 255), 1)
@@ -179,7 +179,7 @@ def show_image_prediction(
     axes[0].axis("off")
 
     for i, mask_obj in enumerate(prediction.masks):
-        vis = draw_masks_on_image(img, mask_obj.mask[None], alpha=alpha)
+        vis = draw_masks_on_image(img, mask_obj.data[None], alpha=alpha)
         axes[i + 1].imshow(vis)
         title = f"Mask {i}"
         if show_scores:
@@ -217,7 +217,7 @@ def show_auto_masks(
     img = load_image(image) if not isinstance(image, np.ndarray) else image
     masks_to_show = result.masks[:max_masks] if max_masks else result.masks
 
-    all_masks = np.stack([m.mask for m in masks_to_show]) if masks_to_show else np.zeros(
+    all_masks = np.stack([m.data for m in masks_to_show]) if masks_to_show else np.zeros(
         (0, *img.shape[:2]), dtype=bool
     )
     overlay = draw_masks_on_image(img, all_masks, alpha=alpha)
@@ -259,11 +259,18 @@ def show_video_frame(
     import matplotlib.pyplot as plt
 
     img = load_image(image) if not isinstance(image, np.ndarray) else image
-    colors = [_get_color(oid) for oid in frame_masks.object_ids]
-    overlay = draw_masks_on_image(img, frame_masks.masks, alpha=alpha, colors=colors)
+    oids = frame_masks.object_ids
+    colors = [_get_color(oid) for oid in oids]
+    masks_arr = (
+        np.stack([frame_masks.masks[oid] for oid in oids])
+        if oids
+        else np.zeros((0, *img.shape[:2]), dtype=bool)
+    )
+    overlay = draw_masks_on_image(img, masks_arr, alpha=alpha, colors=colors)
 
     if show_ids:
-        for i, (mask, oid) in enumerate(zip(frame_masks.masks, frame_masks.object_ids)):
+        for oid in oids:
+            mask = frame_masks.masks[oid]
             ys, xs = np.where(mask)
             if len(xs) > 0:
                 cx, cy = int(xs.mean()), int(ys.mean())
@@ -309,21 +316,27 @@ def save_video_overlay(
     Returns:
         Path to the output directory.
     """
-    from easier_sam2.utils import list_frame_files
+    from lazysammy2.utils import list_frame_files
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     frame_files = list_frame_files(video_dir)
 
-    for fm in results:
-        if fm.frame_idx >= len(frame_files):
+    for frame_idx, fm in results:
+        if frame_idx >= len(frame_files):
             continue
-        img = load_image(frame_files[fm.frame_idx])
-        colors = [_get_color(oid) for oid in fm.object_ids]
-        overlay = draw_masks_on_image(
-            img, fm.masks, alpha=alpha, colors=colors, draw_contours=draw_contours
+        img = load_image(frame_files[frame_idx])
+        oids = fm.object_ids
+        colors = [_get_color(oid) for oid in oids]
+        masks_arr = (
+            np.stack([fm.masks[oid] for oid in oids])
+            if oids
+            else np.zeros((0, *img.shape[:2]), dtype=bool)
         )
-        out_path = out / f"frame_{fm.frame_idx:06d}.png"
+        overlay = draw_masks_on_image(
+            img, masks_arr, alpha=alpha, colors=colors, draw_contours=draw_contours
+        )
+        out_path = out / f"frame_{frame_idx:06d}.png"
         cv2.imwrite(str(out_path), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
 
     return out
@@ -362,7 +375,7 @@ def save_video_overlay_mp4(
     Returns:
         Path to the written video file.
     """
-    from easier_sam2.utils import list_frame_files
+    from lazysammy2.utils import list_frame_files
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -385,16 +398,19 @@ def save_video_overlay_mp4(
     try:
         for idx, fpath in enumerate(frame_files):
             img = load_image(fpath)
-            fm = results.frame_masks.get(idx)
+            fm = results._frame_index().get(idx)
 
             if fm is not None and len(fm.object_ids) > 0:
-                colors = [_get_color(oid) for oid in fm.object_ids]
+                oids = fm.object_ids
+                colors = [_get_color(oid) for oid in oids]
+                masks_arr = np.stack([fm.masks[oid] for oid in oids])
                 frame = draw_masks_on_image(
-                    img, fm.masks, alpha=alpha, colors=colors,
+                    img, masks_arr, alpha=alpha, colors=colors,
                     draw_contours=draw_contours,
                 )
                 if show_ids:
-                    for mask, oid in zip(fm.masks, fm.object_ids):
+                    for oid in oids:
+                        mask = fm.masks[oid]
                         ys, xs = np.where(mask)
                         if len(xs) > 0:
                             cx, cy = int(xs.mean()), int(ys.mean())

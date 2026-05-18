@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 import torch
 
-from easier_sam2.types import (
+from lazysammy2.types import (
     BoundingBox,
     FrameMasks,
     MaskInput,
@@ -19,7 +19,7 @@ from easier_sam2.types import (
     PointLabels,
     VideoResults,
 )
-from easier_sam2.utils import (
+from lazysammy2.utils import (
     auto_detect_device,
     extract_frames,
     get_autocast_dtype,
@@ -69,7 +69,7 @@ class VideoTracker:
             vos_optimized: Enable ``torch.compile`` for max FPS.
             **kwargs: Forwarded to the video predictor constructor.
         """
-        from easier_sam2.models import load_video_predictor
+        from lazysammy2.models import load_video_predictor
 
         self._predictor = load_video_predictor(
             model_size,
@@ -78,7 +78,7 @@ class VideoTracker:
             vos_optimized=vos_optimized,
             **kwargs,
         )
-        self._device = auto_detect_device(device)
+        self._device = torch.device(auto_detect_device(device))
         self._dtype = get_autocast_dtype(self._device)
 
     def new_session(
@@ -291,7 +291,7 @@ class VideoSession:
                 reverse=reverse,
             ):
                 fm = self._to_frame_masks(fidx, obj_ids, masks)
-                results.frame_masks[fidx] = fm
+                results.frames.append(fm)
 
         self._results = results
         logger.info(
@@ -327,8 +327,10 @@ class VideoSession:
         )
         # Merge: forward takes priority on overlapping frames
         merged = VideoResults(video_dir=self._video_dir, num_frames=self._num_frames)
-        merged.frame_masks.update(backward.frame_masks)
-        merged.frame_masks.update(forward.frame_masks)
+        bwd_index = {fm.frame_idx: fm for fm in backward.frames}
+        fwd_index = {fm.frame_idx: fm for fm in forward.frames}
+        combined = {**bwd_index, **fwd_index}  # forward takes priority
+        merged.frames = list(combined.values())
         self._results = merged
         return merged
 
@@ -393,11 +395,11 @@ class VideoSession:
         Returns:
             ``(H, W, 3)`` RGB uint8 array.
         """
-        from easier_sam2.utils import load_image
+        from lazysammy2.utils import load_image
 
         frames = list_frame_files(self._video_dir)
         if frame_idx < 0 or frame_idx >= len(frames):
-            msg = f"frame_idx {frame_idx} out of range (0–{len(frames) - 1})"
+            msg = f"frame_idx {frame_idx} out of range (0-{len(frames) - 1})"
             raise IndexError(msg)
         return load_image(frames[frame_idx])
 
@@ -464,7 +466,7 @@ class VideoSession:
         Raises:
             RuntimeError: If no results are available.
         """
-        from easier_sam2.visualization import save_video_overlay, save_video_overlay_mp4
+        from lazysammy2.visualization import save_video_overlay, save_video_overlay_mp4
 
         res = results or self._results
         if res is None:
@@ -496,10 +498,8 @@ class VideoSession:
         """Convert raw predictor output to :class:`FrameMasks`."""
         obj_id_list = [int(o) for o in obj_ids]
         masks_binary = (masks_tensor > _SCORE_THRESH).squeeze(1).cpu().numpy().astype(bool)
-        scores = masks_tensor.cpu().numpy()
+        masks_dict = {oid: masks_binary[i] for i, oid in enumerate(obj_id_list)}
         return FrameMasks(
             frame_idx=frame_idx,
-            object_ids=obj_id_list,
-            masks=masks_binary,
-            scores=scores,
+            masks=masks_dict,
         )

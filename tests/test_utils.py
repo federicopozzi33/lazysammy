@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from easier_sam2.utils import (
+from lazysammy2.utils import (
     auto_detect_device,
     combine_masks,
     list_frame_files,

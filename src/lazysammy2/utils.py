@@ -1,21 +1,19 @@
-"""Shared utility helpers for easier-sam2."""
+"""Shared utility helpers for lazysammy2."""
 
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Sequence
+from typing import Any
 
 import cv2
 import numpy as np
 import numpy.typing as npt
 import torch
 
-if TYPE_CHECKING:
-    from PIL import Image as PILImage
-
-from easier_sam2.types import AutoMaskResult, FrameMasks, ImagePrediction, VideoResults
+from lazysammy2.types import AutoMaskResult, ImagePrediction, VideoResults
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +23,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def auto_detect_device(preferred: str | None = None) -> torch.device:
-    """Detect the best available device.
+def auto_detect_device(preferred: str | None = None) -> str:
+    """Detect the best available device string.
 
     Priority: explicit *preferred* > CUDA > MPS > CPU.
 
@@ -34,15 +32,15 @@ def auto_detect_device(preferred: str | None = None) -> torch.device:
         preferred: Force a specific device string (e.g. ``"cuda:1"``).
 
     Returns:
-        A :class:`torch.device`.
+        A device string such as ``"cuda"``, ``"mps"``, or ``"cpu"``.
     """
     if preferred is not None:
-        return torch.device(preferred)
+        return preferred
     if torch.cuda.is_available():
-        return torch.device("cuda")
+        return "cuda"
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+        return "mps"
+    return "cpu"
 
 
 def get_autocast_dtype(device: torch.device) -> torch.dtype:
@@ -205,19 +203,14 @@ def list_frame_files(video_dir: str | Path) -> list[Path]:
 
 
 def save_masks_as_png(
-    masks: npt.NDArray[np.bool_],
+    masks: dict[str, npt.NDArray[np.bool_]],
     output_dir: str | Path,
-    *,
-    prefix: str = "mask",
-    object_ids: Sequence[int] | None = None,
 ) -> list[Path]:
     """Save binary masks as individual PNG files.
 
     Args:
-        masks: ``(N, H, W)`` boolean mask array.
+        masks: Mapping of name to ``(H, W)`` boolean mask array.
         output_dir: Target directory (created if needed).
-        prefix: Filename prefix.
-        object_ids: Optional object id labels for naming.
 
     Returns:
         List of written file paths.
@@ -225,31 +218,34 @@ def save_masks_as_png(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
-    for i, mask in enumerate(masks):
-        label = object_ids[i] if object_ids is not None else i
-        p = out / f"{prefix}_{label:04d}.png"
+    for name, mask in masks.items():
+        p = out / f"{name}.png"
         cv2.imwrite(str(p), mask.astype(np.uint8) * 255)
         paths.append(p)
     return paths
 
 
 def save_masks_as_npy(
-    masks: npt.NDArray[np.bool_],
-    output_path: str | Path,
-) -> Path:
-    """Save masks to a single ``.npy`` file.
+    masks: dict[str, npt.NDArray[np.bool_]],
+    output_dir: str | Path,
+) -> list[Path]:
+    """Save masks as individual ``.npy`` files.
 
     Args:
-        masks: ``(N, H, W)`` boolean array.
-        output_path: Destination file path.
+        masks: Mapping of name to ``(H, W)`` boolean array.
+        output_dir: Destination directory.
 
     Returns:
-        The written file path.
+        List of written file paths.
     """
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    np.save(output_path, masks)
-    return output_path
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    for name, mask in masks.items():
+        p = out / f"{name}.npy"
+        np.save(p, mask)
+        paths.append(p)
+    return paths
 
 
 def masks_to_rle(masks: npt.NDArray[np.bool_]) -> list[dict[str, Any]]:
@@ -273,32 +269,34 @@ def masks_to_rle(masks: npt.NDArray[np.bool_]) -> list[dict[str, Any]]:
 
 
 def save_masks_as_coco_rle(
-    masks: npt.NDArray[np.bool_],
-    output_path: str | Path,
-    *,
-    object_ids: Sequence[int] | None = None,
-) -> Path:
-    """Save masks as a JSON file with COCO RLE encoding.
+    masks: dict[str, npt.NDArray[np.bool_]],
+    output_dir: str | Path,
+) -> list[Path]:
+    """Save masks as individual JSON files with COCO RLE encoding.
+
+    Each file is named ``<key>.json`` and contains the RLE dict directly
+    (with ``"size"`` and ``"counts"`` keys).
 
     Args:
-        masks: ``(N, H, W)`` boolean array.
-        output_path: Destination JSON file.
-        object_ids: Optional object id labels.
+        masks: Mapping of name to ``(H, W)`` boolean array.
+        output_dir: Destination directory.
 
     Returns:
-        The written file path.
+        List of written file paths.
     """
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    rles = masks_to_rle(masks)
-    annotations: list[dict[str, Any]] = []
-    for i, rle in enumerate(rles):
-        ann: dict[str, Any] = {"id": i, "rle": rle}
-        if object_ids is not None:
-            ann["object_id"] = int(object_ids[i])
-        annotations.append(ann)
-    output_path.write_text(json.dumps(annotations, indent=2))
-    return output_path
+    from pycocotools import mask as mask_utils
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    for name, mask in masks.items():
+        fortran = np.asfortranarray(mask.astype(np.uint8))
+        rle = mask_utils.encode(fortran)
+        rle["counts"] = rle["counts"].decode("utf-8")
+        p = out / f"{name}.json"
+        p.write_text(json.dumps(rle))
+        paths.append(p)
+    return paths
 
 
 # ---------------------------------------------------------------------------
@@ -334,25 +332,15 @@ def save_video_results(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    for fm in results:
-        frame_dir = out / f"frame_{fm.frame_idx:06d}"
+    for frame_idx, fm in results:
+        frame_dir = out / f"frame_{frame_idx:06d}"
+        masks_dict = {f"obj_{oid:04d}": mask for oid, mask in fm.masks.items()}
         if fmt == "png":
-            save_masks_as_png(
-                fm.masks,
-                frame_dir,
-                prefix="obj",
-                object_ids=fm.object_ids,
-            )
+            save_masks_as_png(masks_dict, frame_dir)
         elif fmt == "npy":
-            frame_dir.mkdir(parents=True, exist_ok=True)
-            np.save(frame_dir / "masks.npy", fm.masks)
+            save_masks_as_npy(masks_dict, frame_dir)
         elif fmt == "coco_rle":
-            frame_dir.mkdir(parents=True, exist_ok=True)
-            save_masks_as_coco_rle(
-                fm.masks,
-                frame_dir / "masks.json",
-                object_ids=fm.object_ids,
-            )
+            save_masks_as_coco_rle(masks_dict, frame_dir)
         else:
             msg = f"Unsupported save format: {fmt!r}. Use 'png', 'npy', or 'coco_rle'."
             raise ValueError(msg)
@@ -378,17 +366,17 @@ def save_image_prediction(
     Returns:
         Path to the output directory (or npy/json file).
     """
-    masks = prediction.numpy()
+    masks_dict = {f"mask_{i:04d}": m.data for i, m in enumerate(prediction.masks)}
     out = Path(output_dir)
     if fmt == "png":
-        save_masks_as_png(masks, out, prefix=prefix)
+        save_masks_as_png(masks_dict, out)
         return out
     if fmt == "npy":
-        out.mkdir(parents=True, exist_ok=True)
-        return save_masks_as_npy(masks, out / "masks.npy")
+        save_masks_as_npy(masks_dict, out)
+        return out
     if fmt == "coco_rle":
-        out.mkdir(parents=True, exist_ok=True)
-        return save_masks_as_coco_rle(masks, out / "masks.json")
+        save_masks_as_coco_rle(masks_dict, out)
+        return out
     msg = f"Unsupported save format: {fmt!r}. Use 'png', 'npy', or 'coco_rle'."
     raise ValueError(msg)
 
@@ -414,17 +402,17 @@ def save_auto_mask_result(
     Returns:
         Path to the output.
     """
-    masks = result.numpy()
+    masks_dict = {f"auto_mask_{i:04d}": m.data for i, m in enumerate(result.masks)}
     out = Path(output_dir)
     if fmt == "png":
-        save_masks_as_png(masks, out, prefix="auto_mask")
+        save_masks_as_png(masks_dict, out)
         return out
     if fmt == "npy":
-        out.mkdir(parents=True, exist_ok=True)
-        return save_masks_as_npy(masks, out / "auto_masks.npy")
+        save_masks_as_npy(masks_dict, out)
+        return out
     if fmt == "coco_rle":
-        out.mkdir(parents=True, exist_ok=True)
-        return save_masks_as_coco_rle(masks, out / "auto_masks.json")
+        save_masks_as_coco_rle(masks_dict, out)
+        return out
     msg = f"Unsupported save format: {fmt!r}. Use 'png', 'npy', or 'coco_rle'."
     raise ValueError(msg)
 
@@ -457,9 +445,10 @@ def masks_to_colored_overlay(
         colors = [tuple(int(c) for c in rng.integers(60, 220, size=3)) for _ in range(len(masks))]
 
     overlay = image.copy()
-    for mask, color in zip(masks, colors):
+    for mask, color in zip(masks, colors, strict=False):
         overlay[mask] = (
-            np.array(color, dtype=np.float32) * alpha + overlay[mask].astype(np.float32) * (1 - alpha)
+            np.array(color, dtype=np.float32) * alpha
+            + overlay[mask].astype(np.float32) * (1 - alpha)
         ).astype(np.uint8)
     return overlay
 
@@ -476,7 +465,7 @@ def combine_masks(masks: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]:
     return np.any(masks, axis=0)
 
 
-def mask_to_bbox(mask: npt.NDArray[np.bool_]) -> tuple[int, int, int, int]:
+def mask_to_bbox(mask: npt.NDArray[np.bool_]) -> list[int]:
     """Compute the bounding box of a binary mask.
 
     Args:
@@ -489,7 +478,7 @@ def mask_to_bbox(mask: npt.NDArray[np.bool_]) -> tuple[int, int, int, int]:
     cols = np.any(mask, axis=0)
     y_min, y_max = np.where(rows)[0][[0, -1]]
     x_min, x_max = np.where(cols)[0][[0, -1]]
-    return int(x_min), int(y_min), int(x_max), int(y_max)
+    return [int(x_min), int(y_min), int(x_max), int(y_max)]
 
 
 def mask_iou(mask_a: npt.NDArray[np.bool_], mask_b: npt.NDArray[np.bool_]) -> float:

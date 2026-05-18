@@ -21,13 +21,12 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-from easier_sam2.types import (
+from lazysammy2.types import (
     CONFIG_FILENAMES,
-    CHECKPOINT_URLS,
     HF_MODEL_IDS,
     ModelSize,
 )
-from easier_sam2.utils import auto_detect_device
+from lazysammy2.utils import auto_detect_device
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +107,7 @@ def load_image_predictor(
     Returns:
         An initialised ``SAM2ImagePredictor``.
     """
-    dev = auto_detect_device(device)
+    dev = torch.device(auto_detect_device(device))
     model_size_str = str(model_size)
 
     if _is_hf_model_id(model_size_str):
@@ -157,7 +156,7 @@ def load_video_predictor(
     Returns:
         An initialised ``SAM2VideoPredictor``.
     """
-    dev = auto_detect_device(device)
+    dev = torch.device(auto_detect_device(device))
     model_size_str = str(model_size)
 
     if _is_hf_model_id(model_size_str):
@@ -215,7 +214,7 @@ def load_auto_mask_generator(
     Returns:
         An initialised ``SAM2AutomaticMaskGenerator``.
     """
-    dev = auto_detect_device(device)
+    dev = torch.device(auto_detect_device(device))
     model_size_str = str(model_size)
 
     if _is_hf_model_id(model_size_str):

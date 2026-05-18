@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from easier_sam2.types import (
+from lazysammy2.types import (
     AutoMask,
     AutoMaskResult,
     FrameMasks,

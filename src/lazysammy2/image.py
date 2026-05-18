@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 import torch
 
-from easier_sam2.types import (
+from lazysammy2.types import (
     BoundingBox,
     ImagePrediction,
     Mask,
@@ -19,7 +20,7 @@ from easier_sam2.types import (
     PointCoords,
     PointLabels,
 )
-from easier_sam2.utils import (
+from lazysammy2.utils import (
     auto_detect_device,
     get_autocast_dtype,
     load_image,
@@ -59,12 +60,12 @@ class ImageSegmenter:
             device: Device override (auto-detected if ``None``).
             **kwargs: Extra arguments forwarded to the predictor constructor.
         """
-        from easier_sam2.models import load_image_predictor
+        from lazysammy2.models import load_image_predictor
 
         self._predictor = load_image_predictor(
             model_size, checkpoint=checkpoint, device=device, **kwargs
         )
-        self._device = auto_detect_device(device)
+        self._device = torch.device(auto_detect_device(device))
         self._dtype = get_autocast_dtype(self._device)
 
     # ------------------------------------------------------------------
@@ -115,7 +116,7 @@ class ImageSegmenter:
 
         mask_objs = [
             Mask(
-                mask=masks_np[i].astype(bool),
+                data=masks_np[i].astype(bool),
                 score=float(scores_np[i]),
                 logits=logits_np[i] if logits_np is not None else None,
             )
@@ -171,7 +172,7 @@ class ImageSegmenter:
             logits_np = all_logits[i]
             mask_objs = [
                 Mask(
-                    mask=masks_np[j].astype(bool),
+                    data=masks_np[j].astype(bool),
                     score=float(scores_np[j]),
                     logits=logits_np[j],
                 )

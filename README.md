@@ -1,8 +1,8 @@
-# easier-sam2
+# lazysammy2
 
 A simplified, batteries-included wrapper around [Meta's SAM 2](https://github.com/facebookresearch/sam2).
 
-**easier-sam2** provides a single `SAM2` object that gives you access to:
+**lazysammy2** provides a single `SAM2` object that gives you access to:
 
 - **Image segmentation** – point, box, mask and multi-box prompts with iterative refinement
 - **Video object tracking** – multi-object tracking with prompts at arbitrary frames and bidirectional propagation
@@ -18,8 +18,8 @@ The project uses [uv](https://docs.astral.sh/uv/) as its package manager.
 
 ```bash
 # Clone and install
-git clone https://github.com/your-org/easier-sam2.git
-cd easier-sam2
+git clone https://github.com/your-org/lazysammy2.git
+cd lazysammy2
 uv sync
 
 # With visualization extras (matplotlib)
@@ -36,7 +36,7 @@ uv sync --extra dev
 ## Quick start
 
 ```python
-from easier_sam2 import SAM2
+from lazysammy2 import SAM2
 
 sam = SAM2("large")  # auto-downloads from HuggingFace Hub
 ```
@@ -146,7 +146,7 @@ sam = SAM2("large", vos_optimized=True)
 ### Using sub-components directly
 
 ```python
-from easier_sam2 import ImageSegmenter, VideoTracker, AutoSegmenter
+from lazysammy2 import ImageSegmenter, VideoTracker, AutoSegmenter
 
 # Each component can be used independently
 img_seg = ImageSegmenter("large", device="cuda")
@@ -157,7 +157,7 @@ auto_seg = AutoSegmenter("large")
 ### Visualization
 
 ```python
-from easier_sam2 import (
+from lazysammy2 import (
     draw_masks_on_image,
     draw_points_on_image,
     draw_box_on_image,
@@ -185,7 +185,7 @@ save_video_overlay("path/to/frames/", results, "output/overlays/")
 ### Saving results
 
 ```python
-from easier_sam2.utils import (
+from lazysammy2.utils import (
     save_masks_as_png,
     save_masks_as_npy,
     save_masks_as_coco_rle,
