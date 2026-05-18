@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
-from lazysammy2.utils import (
+from lazysammy.utils import (
     auto_detect_device,
     combine_masks,
     list_frame_files,
@@ -90,6 +91,11 @@ class TestMaskOps:
         m[10:30, 20:50] = True
         bbox = mask_to_bbox(m)
         assert bbox == [20, 10, 49, 29]
+
+    def test_mask_to_bbox_empty_raises(self) -> None:
+        m = np.zeros((10, 10), dtype=bool)
+        with pytest.raises(ValueError, match="mask is empty"):
+            mask_to_bbox(m)
 
     def test_mask_iou_identical(self) -> None:
         m = np.ones((10, 10), dtype=bool)

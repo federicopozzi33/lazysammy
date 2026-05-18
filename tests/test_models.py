@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from lazysammy2.models import resolve_model_size
-from lazysammy2.types import ModelSize
+from lazysammy.models import resolve_model_size
+from lazysammy.types import ModelSize
 
 
 class TestResolveModelSize:

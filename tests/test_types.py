@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from lazysammy2.types import (
+from lazysammy.types import (
     AutoMask,
     AutoMaskResult,
     FrameMasks,
@@ -82,6 +83,11 @@ class TestImagePrediction:
         pred = ImagePrediction(masks=masks)
         assert len(pred) == 1
 
+    def test_best_mask_raises_for_empty_prediction(self) -> None:
+        pred = ImagePrediction(masks=[])
+        with pytest.raises(ValueError, match="does not contain any masks"):
+            _ = pred.best_mask
+
 
 class TestAutoMaskResult:
     """AutoMaskResult filtering tests."""
@@ -151,6 +157,12 @@ class TestVideoResults:
         assert len(obj1) == 2
         obj2 = vr.get_object_masks(2)
         assert len(obj2) == 1
+
+    def test_get_frame_masks(self) -> None:
+        fm0 = FrameMasks(frame_idx=0, masks={1: np.ones((10, 10), dtype=bool)})
+        vr = VideoResults(frames=[fm0])
+        assert vr.get_frame_masks(0) is fm0
+        assert vr.get_frame_masks(1) is None
 
     def test_object_ids(self) -> None:
         fm0 = FrameMasks(frame_idx=0, masks={1: np.ones((10, 10), dtype=bool)})

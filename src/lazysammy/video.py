@@ -10,7 +10,8 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from lazysammy2.types import (
+from lazysammy.io import save_video_results
+from lazysammy.types import (
     BoundingBox,
     FrameMasks,
     MaskInput,
@@ -19,13 +20,20 @@ from lazysammy2.types import (
     PointLabels,
     VideoResults,
 )
-from lazysammy2.utils import (
+from lazysammy.utils import (
     auto_detect_device,
     extract_frames,
     get_autocast_dtype,
     is_video_file,
     list_frame_files,
-    save_video_results,
+)
+from lazysammy.validation import (
+    normalize_box,
+    validate_box,
+    validate_frame_index,
+    validate_mask_array,
+    validate_points_and_labels,
+    validate_positive_int,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,7 +77,7 @@ class VideoTracker:
             vos_optimized: Enable ``torch.compile`` for max FPS.
             **kwargs: Forwarded to the video predictor constructor.
         """
-        from lazysammy2.models import load_video_predictor
+        from lazysammy.models import load_video_predictor
 
         self._predictor = load_video_predictor(
             model_size,
@@ -109,6 +117,9 @@ class VideoTracker:
         Returns:
             A :class:`VideoSession` that you can add prompts to and propagate.
         """
+        validate_positive_int("every_n", every_n)
+        validate_positive_int("max_frames", max_frames)
+
         video = Path(video)
         if is_video_file(video):
             video_dir = extract_frames(
@@ -130,6 +141,7 @@ class VideoTracker:
             inference_state=state,
             video_dir=video_dir,
             num_frames=len(frame_files),
+            frame_files=frame_files,
             device=self._device,
             dtype=self._dtype,
         )
@@ -158,6 +170,7 @@ class VideoSession:
         inference_state: Any,
         video_dir: Path,
         num_frames: int,
+        frame_files: list[Path],
         device: torch.device,
         dtype: torch.dtype,
     ) -> None:
@@ -165,6 +178,7 @@ class VideoSession:
         self._state = inference_state
         self._video_dir = video_dir
         self._num_frames = num_frames
+        self._frame_files = frame_files
         self._device = device
         self._dtype = dtype
         self._results: VideoResults | None = None
@@ -194,6 +208,8 @@ class VideoSession:
         Returns:
             Predicted :class:`FrameMasks` for the prompted frame.
         """
+        validate_frame_index(frame_idx, self._num_frames)
+        validate_points_and_labels(points, labels)
         pts = np.array(points, dtype=np.float32)
         lbs = np.array(labels, dtype=np.int32)
 
@@ -224,7 +240,9 @@ class VideoSession:
         Returns:
             Predicted :class:`FrameMasks` for the prompted frame.
         """
-        bx = np.array(box, dtype=np.float32)
+        validate_frame_index(frame_idx, self._num_frames)
+        validate_box(box)
+        bx = normalize_box(box)
 
         with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
             fidx, obj_ids, masks = self._predictor.add_new_points_or_box(
@@ -251,6 +269,8 @@ class VideoSession:
         Returns:
             Predicted :class:`FrameMasks` for the prompted frame.
         """
+        validate_frame_index(frame_idx, self._num_frames)
+        validate_mask_array(mask, allow_3d=False)
         with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
             fidx, obj_ids, masks = self._predictor.add_new_mask(
                 inference_state=self._state,
@@ -281,6 +301,10 @@ class VideoSession:
         Returns:
             :class:`VideoResults` containing masks for every tracked frame.
         """
+        if start_frame is not None:
+            validate_frame_index(start_frame, self._num_frames)
+        validate_positive_int("max_frames", max_frames)
+
         results = VideoResults(video_dir=self._video_dir, num_frames=self._num_frames)
 
         with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
@@ -330,7 +354,7 @@ class VideoSession:
         bwd_index = {fm.frame_idx: fm for fm in backward.frames}
         fwd_index = {fm.frame_idx: fm for fm in forward.frames}
         combined = {**bwd_index, **fwd_index}  # forward takes priority
-        merged.frames = list(combined.values())
+        merged.frames = [combined[idx] for idx in sorted(combined)]
         self._results = merged
         return merged
 
@@ -355,6 +379,7 @@ class VideoSession:
             frame_idx: The frame to clear.
             obj_id: The object whose prompts to clear.
         """
+        validate_frame_index(frame_idx, self._num_frames)
         with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
             self._predictor.clear_all_prompts_in_frame(
                 self._state, frame_idx, obj_id
@@ -395,13 +420,10 @@ class VideoSession:
         Returns:
             ``(H, W, 3)`` RGB uint8 array.
         """
-        from lazysammy2.utils import load_image
+        from lazysammy.utils import load_image
 
-        frames = list_frame_files(self._video_dir)
-        if frame_idx < 0 or frame_idx >= len(frames):
-            msg = f"frame_idx {frame_idx} out of range (0-{len(frames) - 1})"
-            raise IndexError(msg)
-        return load_image(frames[frame_idx])
+        validate_frame_index(frame_idx, self._num_frames)
+        return load_image(self._frame_files[frame_idx])
 
     # ------------------------------------------------------------------
     # Save
@@ -466,7 +488,7 @@ class VideoSession:
         Raises:
             RuntimeError: If no results are available.
         """
-        from lazysammy2.visualization import save_video_overlay, save_video_overlay_mp4
+        from lazysammy.visualization import save_video_overlay, save_video_overlay_mp4
 
         res = results or self._results
         if res is None:

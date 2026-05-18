@@ -1,4 +1,4 @@
-"""Shared utility helpers for lazysammy2."""
+"""Shared utility helpers for lazysammy."""
 
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from lazysammy2.types import AutoMaskResult, ImagePrediction, VideoResults
+from lazysammy.types import AutoMaskResult, ImagePrediction, VideoResults
+from lazysammy.validation import validate_image_array
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +79,11 @@ def load_image(source: str | Path | npt.NDArray[np.uint8]) -> npt.NDArray[np.uin
         ValueError: If the loaded image is ``None``.
     """
     if isinstance(source, np.ndarray):
+        validate_image_array(source)
         if source.ndim == 2:
             return cv2.cvtColor(source, cv2.COLOR_GRAY2RGB)
         if source.shape[2] == 4:
-            return cv2.cvtColor(source, cv2.COLOR_BGRA2RGB)
+            return cv2.cvtColor(source, cv2.COLOR_RGBA2RGB)
         return source
 
     path = Path(source)
@@ -329,21 +331,9 @@ def save_video_results(
     Returns:
         Path to the root output directory.
     """
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
+    from lazysammy.io import save_video_results as _save_video_results
 
-    for frame_idx, fm in results:
-        frame_dir = out / f"frame_{frame_idx:06d}"
-        masks_dict = {f"obj_{oid:04d}": mask for oid, mask in fm.masks.items()}
-        if fmt == "png":
-            save_masks_as_png(masks_dict, frame_dir)
-        elif fmt == "npy":
-            save_masks_as_npy(masks_dict, frame_dir)
-        elif fmt == "coco_rle":
-            save_masks_as_coco_rle(masks_dict, frame_dir)
-        else:
-            msg = f"Unsupported save format: {fmt!r}. Use 'png', 'npy', or 'coco_rle'."
-            raise ValueError(msg)
+    out = _save_video_results(results, output_dir, fmt=fmt)
     logger.info("Saved %d frames to %s (format=%s)", len(results), out, fmt)
     return out
 
@@ -366,19 +356,10 @@ def save_image_prediction(
     Returns:
         Path to the output directory (or npy/json file).
     """
-    masks_dict = {f"mask_{i:04d}": m.data for i, m in enumerate(prediction.masks)}
-    out = Path(output_dir)
-    if fmt == "png":
-        save_masks_as_png(masks_dict, out)
-        return out
-    if fmt == "npy":
-        save_masks_as_npy(masks_dict, out)
-        return out
-    if fmt == "coco_rle":
-        save_masks_as_coco_rle(masks_dict, out)
-        return out
-    msg = f"Unsupported save format: {fmt!r}. Use 'png', 'npy', or 'coco_rle'."
-    raise ValueError(msg)
+    del prefix
+    from lazysammy.io import save_image_prediction as _save_image_prediction
+
+    return _save_image_prediction(prediction, output_dir, fmt=fmt)
 
 
 # ---------------------------------------------------------------------------
@@ -402,19 +383,9 @@ def save_auto_mask_result(
     Returns:
         Path to the output.
     """
-    masks_dict = {f"auto_mask_{i:04d}": m.data for i, m in enumerate(result.masks)}
-    out = Path(output_dir)
-    if fmt == "png":
-        save_masks_as_png(masks_dict, out)
-        return out
-    if fmt == "npy":
-        save_masks_as_npy(masks_dict, out)
-        return out
-    if fmt == "coco_rle":
-        save_masks_as_coco_rle(masks_dict, out)
-        return out
-    msg = f"Unsupported save format: {fmt!r}. Use 'png', 'npy', or 'coco_rle'."
-    raise ValueError(msg)
+    from lazysammy.io import save_auto_mask_result as _save_auto_mask_result
+
+    return _save_auto_mask_result(result, output_dir, fmt=fmt)
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +445,13 @@ def mask_to_bbox(mask: npt.NDArray[np.bool_]) -> list[int]:
     Returns:
         ``(x_min, y_min, x_max, y_max)`` bounding box.
     """
+    if mask.ndim != 2:
+        msg = f"mask must be 2D; got shape {mask.shape!r}."
+        raise ValueError(msg)
+    if not np.any(mask):
+        msg = "mask is empty; cannot compute a bounding box."
+        raise ValueError(msg)
+
     rows = np.any(mask, axis=1)
     cols = np.any(mask, axis=0)
     y_min, y_max = np.where(rows)[0][[0, -1]]

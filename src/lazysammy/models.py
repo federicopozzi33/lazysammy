@@ -21,12 +21,12 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-from lazysammy2.types import (
+from lazysammy.types import (
     CONFIG_FILENAMES,
     HF_MODEL_IDS,
     ModelSize,
 )
-from lazysammy2.utils import auto_detect_device
+from lazysammy.utils import auto_detect_device
 
 logger = logging.getLogger(__name__)
 

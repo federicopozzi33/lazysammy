@@ -1648,7 +1648,7 @@ wheels = [
 ]
 
 [[package]]
-name = "lazysammy2"
+name = "lazysammy"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -1695,7 +1695,7 @@ requires-dist = [
     { name = "ipympl", marker = "extra == 'notebook'", specifier = ">=0.9" },
     { name = "ipywidgets", marker = "extra == 'notebook'", specifier = ">=8.0" },
     { name = "jupyterlab", marker = "extra == 'notebook'", specifier = ">=4.0" },
-    { name = "lazysammy2", extras = ["viz", "notebook", "demo"], marker = "extra == 'all'" },
+    { name = "lazysammy", extras = ["viz", "notebook", "demo"], marker = "extra == 'all'" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.5" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "opencv-python", specifier = ">=4.7" },

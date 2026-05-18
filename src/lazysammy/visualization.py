@@ -1,6 +1,6 @@
 """Visualisation helpers for masks, bounding boxes, and tracking results.
 
-Requires ``matplotlib`` (install via ``pip install lazysammy2[viz]``).
+Requires ``matplotlib`` (install via ``pip install lazysammy[viz]``).
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ import cv2
 import numpy as np
 import numpy.typing as npt
 
-from lazysammy2.types import AutoMaskResult, FrameMasks, ImagePrediction, VideoResults
-from lazysammy2.utils import load_image, masks_to_colored_overlay
+from lazysammy.types import AutoMaskResult, FrameMasks, ImagePrediction, VideoResults
+from lazysammy.utils import load_image, masks_to_colored_overlay
 
 # ---------------------------------------------------------------------------
 # Colour palette
@@ -316,7 +316,7 @@ def save_video_overlay(
     Returns:
         Path to the output directory.
     """
-    from lazysammy2.utils import list_frame_files
+    from lazysammy.utils import list_frame_files
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -375,7 +375,7 @@ def save_video_overlay_mp4(
     Returns:
         Path to the written video file.
     """
-    from lazysammy2.utils import list_frame_files
+    from lazysammy.utils import list_frame_files
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -398,7 +398,7 @@ def save_video_overlay_mp4(
     try:
         for idx, fpath in enumerate(frame_files):
             img = load_image(fpath)
-            fm = results._frame_index().get(idx)
+            fm = results.get_frame_masks(idx)
 
             if fm is not None and len(fm.object_ids) > 0:
                 oids = fm.object_ids

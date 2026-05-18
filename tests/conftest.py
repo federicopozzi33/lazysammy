@@ -1,4 +1,4 @@
-"""Shared test fixtures for lazysammy2."""
+"""Shared test fixtures for lazysammy."""
 
 from __future__ import annotations
 

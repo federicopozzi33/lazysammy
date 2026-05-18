@@ -23,7 +23,7 @@ Typical usage::
 
     %matplotlib widget          # <-- required for interactive clicking
 
-    from lazysammy2.prompts import PromptPicker
+    from lazysammy.prompts import PromptPicker
 
     picker = PromptPicker(session)
 
@@ -47,10 +47,10 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import numpy.typing as npt
 
-from lazysammy2.utils import list_frame_files, load_image
+from lazysammy.utils import list_frame_files, load_image
 
 if TYPE_CHECKING:
-    from lazysammy2.video import VideoSession
+    from lazysammy.video import VideoSession
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +403,7 @@ class PromptPicker:
         Returns:
             ``(points, labels)`` that were added.
         """
-        from lazysammy2.visualization import show_video_frame
+        from lazysammy.visualization import show_video_frame
 
         points, labels = self.pick_points(frame_idx, n=n, **kwargs)
         if not points:
@@ -442,7 +442,7 @@ class PromptPicker:
         Returns:
             ``[x1, y1, x2, y2]`` that was added.
         """
-        from lazysammy2.visualization import show_video_frame
+        from lazysammy.visualization import show_video_frame
 
         box = self.pick_box(frame_idx, **kwargs)
         if not box:

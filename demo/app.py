@@ -1,4 +1,4 @@
-"""Gradio demo for lazysammy2.
+"""Gradio demo for lazysammy.
 
 Launch with::
 
@@ -20,7 +20,7 @@ import cv2
 import gradio as gr
 import numpy as np
 
-from lazysammy2 import SAM2, draw_masks_on_image, extract_frames, save_video_overlay_mp4
+from lazysammy import SAM2, draw_masks_on_image, extract_frames, save_video_overlay_mp4
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ def _segment_with_points(
     sam = _get_model(model_size)
     pred = sam.segment(image, points=coords, labels=labels, multimask_output=multimask)
     best = pred.best_mask
-    overlay = draw_masks_on_image(image, best.mask[np.newaxis], alpha=0.5)
+    overlay = draw_masks_on_image(image, best.numpy()[np.newaxis], alpha=0.5)
     overlay = _draw_points_on_image(overlay, points)
     info = f"Best mask — IoU: {best.score:.3f} | area: {best.area:,} px"
     return overlay, info
@@ -138,7 +138,7 @@ def _segment_with_box(
     sam = _get_model(model_size)
     pred = sam.segment_box(image, x1, y1, x2, y2)
     best = pred.best_mask
-    overlay = draw_masks_on_image(image, best.mask[np.newaxis], alpha=0.5)
+    overlay = draw_masks_on_image(image, best.numpy()[np.newaxis], alpha=0.5)
     cv2.rectangle(overlay, (int(x1), int(y1)), (int(x2), int(y2)), (0, 200, 255), 2)
     info = f"Best mask — IoU: {best.score:.3f} | area: {best.area:,} px"
     return overlay, info
@@ -418,12 +418,12 @@ def _render_mode_instruction(mode: str) -> str:
 def build_app() -> gr.Blocks:
     """Construct and return the Gradio Blocks app."""
 
-    with gr.Blocks(title="lazysammy2 Demo", theme=gr.themes.Soft(), css=_CSS) as app:
+    with gr.Blocks(title="lazysammy Demo", theme=gr.themes.Soft(), css=_CSS) as app:
         gr.Markdown(
-            "# 🎯 lazysammy2 Demo\n"
+            "# 🎯 lazysammy Demo\n"
             "Interactive segmentation & video tracking powered by "
             "[SAM 2](https://github.com/facebookresearch/sam2) via "
-            "[lazysammy2](https://github.com/fpozzi/lazysammy2)."
+            "[lazysammy](https://github.com/fpozzi/lazysammy)."
         )
 
         model_size = gr.Dropdown(

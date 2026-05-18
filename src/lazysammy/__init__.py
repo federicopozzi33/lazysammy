@@ -1,8 +1,8 @@
-"""lazysammy2 - A simplified wrapper around Meta's SAM 2.
+"""lazysammy - A simplified wrapper around Meta's SAM 2.
 
 Quick start::
 
-    from lazysammy2 import SAM2
+    from lazysammy import SAM2
 
     sam = SAM2("large")
 
@@ -22,11 +22,12 @@ Quick start::
 
 from __future__ import annotations
 
-from lazysammy2.auto_mask import AutoSegmenter
-from lazysammy2.image import ImageSegmenter
-from lazysammy2.prompts import PromptPicker, pick_box_on_image, pick_points_on_image, preview_frame
-from lazysammy2.sam2 import SAM2
-from lazysammy2.types import (
+from lazysammy.auto_mask import AutoSegmenter
+from lazysammy.image import ImageSegmenter
+from lazysammy.io import SaveFormat, save_auto_mask_result, save_image_prediction, save_video_results
+from lazysammy.prompts import PromptPicker, pick_box_on_image, pick_points_on_image, preview_frame
+from lazysammy.sam2 import SAM2
+from lazysammy.types import (
     AutoMask,
     AutoMaskResult,
     FrameMasks,
@@ -35,9 +36,14 @@ from lazysammy2.types import (
     ModelSize,
     VideoResults,
 )
-from lazysammy2.utils import extract_frames
-from lazysammy2.video import VideoSession, VideoTracker
-from lazysammy2.visualization import (
+from lazysammy.utils import (
+    extract_frames,
+    save_masks_as_coco_rle,
+    save_masks_as_npy,
+    save_masks_as_png,
+)
+from lazysammy.video import VideoSession, VideoTracker
+from lazysammy.visualization import (
     draw_box_on_image,
     draw_masks_on_image,
     draw_points_on_image,
@@ -71,6 +77,13 @@ __all__ = [
     "preview_frame",
     "save_video_overlay",
     "save_video_overlay_mp4",
+    "SaveFormat",
+    "save_auto_mask_result",
+    "save_image_prediction",
+    "save_masks_as_coco_rle",
+    "save_masks_as_npy",
+    "save_masks_as_png",
+    "save_video_results",
     "show_auto_masks",
     "show_image_prediction",
     "show_video_frame",

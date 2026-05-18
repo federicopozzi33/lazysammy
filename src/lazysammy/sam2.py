@@ -1,4 +1,4 @@
-"""Unified SAM2 facade - the main entry point for ``lazysammy2``.
+"""Unified SAM2 facade - the main entry point for ``lazysammy``.
 
 Provides a single :class:`SAM2` object that lazily initialises image, video,
 and auto-mask predictors as needed, sharing the same model configuration.
@@ -14,9 +14,9 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from lazysammy2.auto_mask import AutoSegmenter
-from lazysammy2.image import ImageSegmenter
-from lazysammy2.types import (
+from lazysammy.auto_mask import AutoSegmenter
+from lazysammy.image import ImageSegmenter
+from lazysammy.types import (
     AutoMaskResult,
     BoundingBox,
     ImagePrediction,
@@ -25,7 +25,7 @@ from lazysammy2.types import (
     PointCoords,
     PointLabels,
 )
-from lazysammy2.video import VideoSession, VideoTracker
+from lazysammy.video import VideoSession, VideoTracker
 
 logger = logging.getLogger(__name__)
 

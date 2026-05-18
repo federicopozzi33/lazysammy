@@ -10,12 +10,12 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from lazysammy2.types import AutoMask, AutoMaskResult, ModelSize
-from lazysammy2.utils import (
+from lazysammy.io import save_auto_mask_result
+from lazysammy.types import AutoMask, AutoMaskResult, ModelSize
+from lazysammy.utils import (
     auto_detect_device,
     get_autocast_dtype,
     load_image,
-    save_auto_mask_result,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ class AutoSegmenter:
             use_m2m: Enable mask-to-mask refinement step.
             **kwargs: Extra arguments forwarded to the generator constructor.
         """
-        from lazysammy2.models import load_auto_mask_generator
+        from lazysammy.models import load_auto_mask_generator
 
         self._generator = load_auto_mask_generator(
             model_size,

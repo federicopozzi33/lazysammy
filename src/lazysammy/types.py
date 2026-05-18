@@ -1,4 +1,4 @@
-"""Core type definitions for lazysammy2."""
+"""Core type definitions for lazysammy."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
+
+from lazysammy.validation import validate_nonempty_masks
 
 
 class ModelSize(str, Enum):
@@ -100,6 +102,11 @@ class Mask:
         """Return the mask as a boolean numpy array."""
         return self.data
 
+    @property
+    def mask(self) -> npt.NDArray[np.bool_]:
+        """Backward-compatible alias for :attr:`data`."""
+        return self.data
+
     def as_uint8(self) -> npt.NDArray[np.uint8]:
         """Return the mask as a uint8 array (0 or 255)."""
         return self.data.astype(np.uint8) * 255
@@ -132,10 +139,14 @@ class ImagePrediction:
     @property
     def best_mask(self) -> Mask:
         """Return the mask with the highest IoU score."""
+        validate_nonempty_masks(len(self.masks), context="ImagePrediction")
         return max(self.masks, key=lambda m: m.score)
 
     def numpy(self) -> npt.NDArray[np.bool_]:
         """Stack all masks into a ``(N, H, W)`` boolean array."""
+        if not self.masks:
+            shape = self.image_shape or (0, 0)
+            return np.zeros((0, *shape), dtype=bool)
         return np.stack([m.data for m in self.masks])
 
     def as_uint8(self) -> npt.NDArray[np.uint8]:
@@ -231,10 +242,15 @@ class VideoResults:
     frames: list[FrameMasks] = field(default_factory=list)
     video_dir: Path | None = None
     num_frames: int = 0
+    _frame_index_cache: dict[int, FrameMasks] = field(default_factory=dict, init=False, repr=False)
+    _frame_index_cache_size: int = field(default=0, init=False, repr=False)
 
     # Internal index for fast frame lookup (populated lazily)
     def _frame_index(self) -> dict[int, FrameMasks]:
-        return {fm.frame_idx: fm for fm in self.frames}
+        if self._frame_index_cache_size != len(self.frames):
+            self._frame_index_cache = {fm.frame_idx: fm for fm in self.frames}
+            self._frame_index_cache_size = len(self.frames)
+        return self._frame_index_cache
 
     # -- iteration helpers --------------------------------------------------
 
@@ -248,6 +264,10 @@ class VideoResults:
 
     def __getitem__(self, frame_idx: int) -> FrameMasks:
         return self._frame_index()[frame_idx]
+
+    def get_frame_masks(self, frame_idx: int) -> FrameMasks | None:
+        """Return masks for a frame, or ``None`` if absent."""
+        return self._frame_index().get(frame_idx)
 
     def get_object_masks(self, obj_id: int) -> dict[int, npt.NDArray[np.bool_]]:
         """Get all masks for a specific object across frames.
