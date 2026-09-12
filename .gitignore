@@ -208,3 +208,30 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ---------------------------------------------------------------------------
+# lazysammy: generated artifacts
+#
+# These are outputs, not sources. Notebooks and the demo write them on every
+# run, and committing them bloats the repository.
+# ---------------------------------------------------------------------------
+
+# Notebook / example outputs
+examples/output/
+examples/**/_frames/
+examples/**/*_frames/
+
+# Extracted frame directories (written by extract_frames)
+*_frames/
+
+# Numpy / mask / overlay outputs
+*.npy
+
+# Video outputs (keep only the curated demo clip under examples/assets/)
+examples/output/*.mp4
+demo_output/
+
+# pytests / coverage / coverage reports
+.coverage
+coverage.xml
+htmlcov/
