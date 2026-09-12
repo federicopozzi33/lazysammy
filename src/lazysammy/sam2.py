@@ -425,7 +425,7 @@ class SAM2:
         """Start a video tracking session.
 
         *video* can be a **folder of JPEG/PNG frames** or a **video file**
-        (mp4, avi, mov, …).  When a video file is given, frames are
+        (mp4, avi, mov, ...).  When a video file is given, frames are
         extracted automatically.
 
         Args:

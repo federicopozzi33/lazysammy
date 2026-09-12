@@ -71,7 +71,7 @@ select = [
     "B",     # flake8-bugbear
     "SIM",   # flake8-simplify
     "TCH",   # flake8-type-checking
-    "RUF",   # ruff-specific rules
+    "RUF",   # ruff-specific rules (includes RUF001/2/3 ambiguous unicode)
     "D",     # pydocstyle
     "ANN",   # flake8-annotations
     "S",     # flake8-bandit (security)
@@ -99,9 +99,6 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D", "ANN", "S"]
-"demo/**" = [
-    "RUF001",  # intentional UI emoji (➕ / ➖) in labels
-]
 
 [tool.mypy]
 python_version = "3.10"

@@ -149,13 +149,13 @@ def extract_frames(
     sort correctly.
 
     Because the output directory is reused, **re-extracting into a directory
-    that already holds frames can mix results from two different settings** —
+    that already holds frames can mix results from two different settings**:
     the new run only writes the frames it produces, leaving older ones in
     place. Pass ``clean=True`` when re-extracting with a different ``every_n``
     or ``max_frames``.
 
     Args:
-        video_path: Path to a video file (mp4, avi, mov, …).
+        video_path: Path to a video file (mp4, avi, mov, ...).
         output_dir: Directory for extracted frames.  If ``None``, a
             sibling directory ``<video_stem>_frames/`` is created next
             to the video.

@@ -26,7 +26,7 @@ only.
 Please **do not** open a public issue for a security problem.
 
 Instead, use GitHub's private vulnerability reporting on the repository
-("Security" → "Report a vulnerability"), or contact the maintainer directly
+("Security" then "Report a vulnerability"), or contact the maintainer directly
 through their GitHub profile. Include:
 
 - a description of the issue and its impact

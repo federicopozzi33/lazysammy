@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/build_notebook.py`, which generates `examples/video_tracking.ipynb`
+  from reviewable Python source so the notebook stays reproducible and diffable.
+- `scripts/make_comparison.py`, which derives the README's side-by-side figure
+  from two real inference runs and refuses to write it unless the raw SAM 2 and
+  `lazysammy` masks agree.
+
+### Changed
+
+- `extract_frames()` accepts `clean=True` and now warns when a re-extraction
+  leaves a mix of frames from two different settings in the output directory.
+
 ## [0.1.0]
 
 Initial public release.

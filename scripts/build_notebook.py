@@ -37,7 +37,7 @@ high-level wrapper around Meta's [SAM 2](https://github.com/facebookresearch/sam
 
 **What you will learn**
 
-1. Load a video — either an `.mp4` file or a folder of frames
+1. Load a video, either an `.mp4` file or a folder of frames
 2. Place prompts interactively (click) or manually (coordinates)
 3. Track multiple objects with prompts on arbitrary frames
 4. Propagate forward, backward, and bidirectionally
@@ -50,10 +50,10 @@ high-level wrapper around Meta's [SAM 2](https://github.com/facebookresearch/sam
 > **Interactive clicking:** the setup cell selects `%matplotlib widget`, which
 > requires `ipympl` (included in the `notebook` extra). If your environment
 > falls back to a non-interactive backend, this notebook detects it and tells
-> you — the manual coordinate API below always works either way.
+> you. The manual coordinate API below always works either way.
 """
     ),
-    md("## 0 — Setup"),
+    md("## 0. Setup"),
     code(
         """
 from pathlib import Path
@@ -96,9 +96,9 @@ print(f"interactive backend available: {is_interactive_backend()}")
     ),
     md(
         """
-## 1 — Load a video
+## 1. Load a video
 
-`lazysammy` accepts **either** a video file (`.mp4`, `.avi`, `.mov`, …) **or**
+`lazysammy` accepts **either** a video file (`.mp4`, `.avi`, `.mov`, ...) **or**
 a directory of frames. When you pass a video file, frames are extracted for you.
 """
     ),
@@ -152,7 +152,7 @@ print(f"Session ready: {session.num_frames} frames from {session.video_dir}")
     ),
     md(
         """
-## 2 — Preview a frame and find coordinates
+## 2. Preview a frame and find coordinates
 
 Before adding prompts you need to know *where* to click. `preview_frame()` shows a
 frame with a coordinate grid; on an interactive backend the toolbar also reports
@@ -174,9 +174,9 @@ print(f"Frame shape: {first_frame.shape}  (H, W, C)")
     ),
     md(
         """
-## 3 — Placing prompts
+## 3. Placing prompts
 
-### 3.1 — Manually, with coordinates
+### 3.1. Manually, with coordinates
 
 The most portable approach: pass explicit `(x, y)` points, read off the grid
 above. This works regardless of matplotlib backend.
@@ -205,7 +205,7 @@ plt.show()
     ),
     md(
         """
-### 3.2 — Interactively, by clicking
+### 3.2. Interactively, by clicking
 
 `PromptPicker` binds to the session: click directly on the frame and the prompt
 is sent to SAM 2 for you.
@@ -218,7 +218,7 @@ is sent to SAM 2 for you.
 | Draw a box | **Left-click** both corners |
 
 > Requires an interactive backend. If `is_interactive_backend()` was `False`
-> above, skip this section — it will warn instead of silently doing nothing.
+> above, skip this section. It warns instead of silently doing nothing.
 """
     ),
     code(
@@ -242,7 +242,7 @@ points, labels = (
     else ([], [])
 )
 if not points:
-    print("No clicks received (non-interactive run) — using coordinates instead.")
+    print("No clicks received (non-interactive run); using coordinates instead.")
     points, labels = [[450, 300]], [1]
     session.add_points(frame_idx=0, obj_id=2, points=points, labels=labels)
 print(f"object 2 -> {len(points)} point(s), labels={labels}")
@@ -250,7 +250,7 @@ print(f"object 2 -> {len(points)} point(s), labels={labels}")
     ),
     md(
         """
-### 3.3 — Prompts on later frames
+### 3.3. Prompts on later frames
 
 Prompts can live on **any** frame, not just the first. Useful when an object
 enters mid-clip, or when you want to correct drift.
@@ -270,9 +270,9 @@ print(f"Added object 3 on frame 10. Objects there: {frame_result.object_ids}")
     ),
     md(
         """
-### 3.4 — Foreground and background together
+### 3.4. Foreground and background together
 
-Negative points (label `0`) exclude regions from a mask — handy when an object
+Negative points (label `0`) exclude regions from a mask, which is handy when an object
 is similar in colour to its surroundings.
 """
     ),
@@ -285,7 +285,7 @@ frame_result = session.add_points(
     points=[
         [350, 250],   # foreground
         [355, 240],   # foreground
-        [300, 380],   # background — exclude this area
+        [300, 380],   # background: exclude this area
     ],
     labels=[1, 1, 0],
     clear_old=True,   # replace this object's previous prompts on this frame
@@ -295,7 +295,7 @@ print(f"Object 1 on frame 0: {int(frame_result.masks[1].sum())} px")
     ),
     md(
         """
-## 4 — Propagate through the video
+## 4. Propagate through the video
 
 With prompts in place, propagate to track every object across frames.
 """
@@ -353,7 +353,7 @@ plt.show()
     ),
     md(
         """
-### 4.1 — Bidirectional propagation
+### 4.1. Bidirectional propagation
 
 If your earliest prompt sits in the middle of the clip, track forward **and**
 backward from it.
@@ -371,7 +371,7 @@ tracked = [idx for idx, _ in results_bidir]
 print(f"Bidirectional: {len(results_bidir)} frame(s), from {tracked[0]} to {tracked[-1]}")
 """
     ),
-    md("### 4.2 — Partial propagation"),
+    md("### 4.2. Partial propagation"),
     code(
         """
 session.reset()
@@ -383,7 +383,7 @@ print(f"Partial propagation: {len(partial)} frame(s)")
     ),
     md(
         """
-## 5 — Inspect results
+## 5. Inspect results
 
 `VideoResults` supports iteration, indexing, and per-object queries.
 """
@@ -415,7 +415,7 @@ print(f"All object ids: {sorted(results.object_ids)}")
     ),
     code(
         """
-# Plot each object's mask area over time — a quick drift sanity check.
+# Plot each object's mask area over time, as a quick drift sanity check.
 fig, ax = plt.subplots(figsize=(11, 4))
 
 for obj_id in sorted(results.object_ids):
@@ -435,7 +435,7 @@ plt.show()
     ),
     md(
         """
-## 6 — Manage objects mid-sequence
+## 6. Manage objects mid-sequence
 
 You can remove objects, clear individual prompts, and reset the whole session.
 """
@@ -473,7 +473,7 @@ print("Session reset.")
     ),
     md(
         """
-## 7 — Save results
+## 7. Save results
 
 Masks can be written as **PNG**, **NumPy `.npy`**, or **COCO RLE JSON**.
 """
@@ -510,10 +510,10 @@ print("Wrote overlay frames to output/overlay_frames")
     ),
     md(
         """
-## 8 — Using a mask prompt
+## 8. Using a mask prompt
 
 Besides points and boxes, an object can be initialised from an **existing binary
-mask** — for example from another model or a manual annotation.
+mask**, for example from another model or a manual annotation.
 """
     ),
     code(
@@ -535,7 +535,7 @@ print(f"Tracked {len(results_from_mask)} frame(s) from the mask prompt")
     ),
     md(
         """
-## 9 — Using the sub-components directly
+## 9. Using the sub-components directly
 
 `sam.video(...)` is a shortcut for `VideoTracker(...).new_session(...)`. You can
 use the lower-level object directly when you want explicit control.
@@ -563,7 +563,7 @@ print(f"Direct tracker: {len(results2)} frame(s), device={tracker.device}")
     ),
     md(
         """
-## 10 — Standalone interactive helpers
+## 10. Standalone interactive helpers
 
 `pick_points_on_image` and `pick_box_on_image` work on **any** image and return
 coordinates you can pass to a session yourself.
@@ -589,7 +589,7 @@ else:
     ),
     md(
         """
-## 11 — Memory and performance tips
+## 11. Memory and performance tips
 
 | Goal | How |
 |------|-----|

@@ -102,7 +102,7 @@ class VideoTracker:
         """Start a new tracking session on a video.
 
         *video* can be either a **directory of frames** (JPEG/PNG) or a
-        **video file** (mp4, avi, mov, …).  When a video file is given the
+        **video file** (mp4, avi, mov, ...).  When a video file is given the
         frames are automatically extracted to *frames_dir* (or a sibling
         directory if ``None``).
 

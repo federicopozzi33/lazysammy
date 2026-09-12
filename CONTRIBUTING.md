@@ -22,7 +22,7 @@ uv sync --extra dev --extra notebook --extra demo
 
 ## Before you open a pull request
 
-Run the same checks CI runs:
+Run these before opening a pull request:
 
 ```bash
 uv run ruff check src/ tests/ demo/
@@ -57,7 +57,7 @@ Tips for that run:
 - **Add tests with the fix.** Bug fixes should come with a regression test;
   see `tests/test_regressions.py` for the pattern.
 - **Don't add heavyweight test dependencies.** Unit tests must not download
-  weights or require a GPU — mark anything that does with
+  weights or require a GPU: mark anything that does with
   `@pytest.mark.integration`.
 - **Public API changes belong in the README and `CHANGELOG.md`.**
 

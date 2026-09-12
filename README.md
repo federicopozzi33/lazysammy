@@ -3,7 +3,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/federicopozzi33/easier-sam2/actions/workflows/ci.yml"><img src="https://github.com/federicopozzi33/easier-sam2/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License"/></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+"/>
   <img src="https://img.shields.io/badge/typing-mypy%20strict-blueviolet" alt="Type checked with mypy strict"/>
@@ -20,33 +19,36 @@
 
 ## Motivation
 
-SAM 2 is a remarkable model with an API designed for **research reproduction**,
-not for everyday use. Every time you want a mask you end up writing the same
-scaffolding: pick a device, pick a matching autocast dtype, build the model from
-a Hydra config string, fetch and point at a checkpoint, remember that SAM 2 wants
-RGB while OpenCV hands you BGR, thread prompts through `predict()`, take `argmax`
-over the IoU scores to choose a mask, threshold the logits, and finally save the
-result. Video is harder still — it is a multi-step state machine (`init_state` →
-`add_new_points_or_box` → `propagate_in_video`) whose outputs you must
-reassemble into per-frame, per-object structures yourself.
+**SAM 2 is excellent. Its API is not.**
 
-That glue code is **not the interesting part of your project**, but it is
-surprisingly easy to get subtly wrong: a lexicographic frame ordering, an
-autocast dtype that silently disables itself, a mask-input shape mismatch.
+The model ships as a research codebase. The shortest path to a single mask means
+building the model from a Hydra config string, locating a checkpoint, matching an
+autocast dtype to the device, converting BGR to RGB, threading prompts through
+`predict()`, taking `argmax` over the IoU scores, thresholding the logits, and
+writing the PNG. Video is worse: three stateful calls whose outputs you
+reassemble into per-frame, per-object structures by hand.
 
-`lazysammy` exists to make that glue disappear, without hiding SAM 2's power.
-It is not a reimplementation and it does not dumb the model down — it is a thin,
-carefully-typed convenience layer. Result objects are introspectable, escape
-hatches are exposed, and the underlying predictors stay reachable whenever you
-need to go deeper.
+None of that is the interesting part of your project, and all of it is easy to
+get quietly wrong. `lazysammy` removes that glue while leaving SAM 2 fully
+intact. It is not a reimplementation and it does not simplify the model; it is a
+thin, typed convenience layer, and the underlying predictors stay reachable
+whenever you want to go deeper.
 
 ### The same task, both ways
 
-Select one point in an image and save the resulting mask.
+Segment one point in an image and save the mask.
 
 <table>
-<tr><th>Raw SAM 2 — <em>7 steps</em></th><th>lazysammy — <em>4 lines</em></th></tr>
-<tr><td>
+<tr>
+<th align="left" width="50%">Raw SAM 2</th>
+<th align="left" width="50%">lazysammy</th>
+</tr>
+<tr>
+<td><code>7 steps | build, device, dtype, checkpoint, argmax, threshold, save</code></td>
+<td><code>1 call | everything below is handled for you</code></td>
+</tr>
+<tr>
+<td>
 
 ```python
 import numpy as np
@@ -60,11 +62,10 @@ from sam2.sam2_image_predictor import (
 # 1. Detect a device
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# 2. Pick an autocast dtype that
-#    matches that device
+# 2. Pick a matching autocast dtype
 dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
-# 3. Build from a config string plus a
+# 3. Build from a config string and a
 #    checkpoint you fetched yourself
 predictor = SAM2ImagePredictor(
     build_sam2(
@@ -96,11 +97,15 @@ binary = masks[best] > 0.0
 Image.fromarray((binary * 255).astype(np.uint8)).save("mask.png")
 ```
 
-</td><td>
+</td>
+<td>
 
 ```python
 from lazysammy import SAM2
 
+# Device detection, autocast dtype, config
+# and checkpoint resolution, RGB conversion,
+# and best-mask selection: all handled.
 sam = SAM2("large")
 
 pred = sam.segment(
@@ -108,27 +113,35 @@ pred = sam.segment(
     points=[[100, 200]],
     labels=[1],
 )
+
 pred.best_mask.save("mask.png")
 ```
 
-</td></tr>
+</td>
+</tr>
 </table>
 
-The steps it removes — device detection, autocast dtype selection, config and
-checkpoint resolution, BGR→RGB conversion, `argmax` over scores, logit
-thresholding, format-specific saving — are exactly the steps that are easy to
-get subtly wrong. The same shortcuts apply to video tracking and automatic mask
+<p align="center">
+  <img src="assets/segment_comparison.png" alt="Both snippets produce the same mask" width="760"/>
+  <br/>
+  <em>Same input, same mask: the two snippets above, run side by side.</em>
+</p>
+
+The steps that disappear (device detection, autocast dtype, config and
+checkpoint resolution, BGR to RGB conversion, `argmax` over scores, logit
+thresholding, format-specific saving) are exactly the steps that are easy to get
+subtly wrong. The same shortcuts apply to video tracking and automatic mask
 generation.
 
 ### What you get
 
-- **One entry point** — `SAM2` covers images, video, and auto-mask generation
-- **Typed, introspectable results** — not bare numpy tuples
-- **Prompt ergonomics** — points, boxes, masks, and iterative refinement
-- **Interactive picking** — click prompts straight onto a frame in a notebook
-- **One-line export** — PNG, `.npy`, and COCO RLE
-- **Portable runtime** — CUDA, Apple MPS, and CPU, auto-detected
-- **Actually typed** — ships `py.typed` and passes `mypy --strict`
+- **One entry point:** `SAM2` covers images, video, and auto-mask generation
+- **Typed, introspectable results:** not bare numpy tuples
+- **Prompt ergonomics:** points, boxes, masks, and iterative refinement
+- **Interactive picking:** click prompts straight onto a frame in a notebook
+- **One-line export:** PNG, `.npy`, and COCO RLE
+- **Portable runtime:** CUDA, Apple MPS, and CPU, auto-detected
+- **Actually typed:** ships `py.typed` and passes `mypy --strict`
 
 ---
 
@@ -398,7 +411,7 @@ session = sam.video(
 
 > Extracted frames are reused across runs, so re-extracting with a different
 > `every_n` or `max_frames` into the same directory would otherwise mix the two
-> runs. Pass `clean=True` to start from a clean directory — the library also
+> runs. Pass `clean=True` to start from a clean directory; the library also
 > warns if it detects this situation.
 
 ### Memory tips
@@ -430,7 +443,7 @@ and managing objects mid-sequence.
 
 > Interactive clicking requires `%matplotlib widget`, enabled in the notebook's
 > setup cell (it comes from `ipympl`, installed by the `notebook` extra). With
-> `%matplotlib inline` plots still render but clicks do not register — the
+> `%matplotlib inline` plots still render but clicks do not register. The
 > notebook detects this and warns you.
 
 ### Gradio demo
@@ -442,9 +455,9 @@ uv run python demo/app.py
 
 Then open <http://localhost:7860>. The demo has three tabs:
 
-- **Image Segmentation** — click points or drag a box directly on the image
-- **Auto Segment** — segment everything, with area and IoU filters
-- **Video Tracking** — upload a clip, click prompts on frames, render an overlay
+- **Image Segmentation:** click points or drag a box directly on the image
+- **Auto Segment:** segment everything, with area and IoU filters
+- **Video Tracking:** upload a clip, click prompts on frames, render an overlay
 
 ---
 
@@ -454,13 +467,13 @@ Then open <http://localhost:7860>. The demo has three tabs:
 uv sync --extra dev
 
 # Lint and format
-uv run ruff check src/ tests/
-uv run ruff format --check src/ tests/
+uv run ruff check src/ tests/ demo/ scripts/
+uv run ruff format --check src/ tests/ demo/ scripts/
 
 # Types (strict)
 uv run mypy src/
 
-# Fast unit tests — no model weights required
+# Fast unit tests (no model weights required)
 uv run pytest
 
 # End-to-end tests with real SAM 2 weights
@@ -471,8 +484,18 @@ Integration tests use the `small` model by default. Override with
 `LAZYSAMMY_TEST_MODEL=tiny`, and set `HF_HUB_OFFLINE=1` to require weights that
 are already cached.
 
+Two helper scripts keep generated artifacts reproducible from checked-in source:
+
+```bash
+# Regenerate examples/video_tracking.ipynb from scripts/build_notebook.py
+uv run python scripts/build_notebook.py
+
+# Regenerate the README comparison figure from real model runs
+uv run python scripts/make_comparison.py
+```
+
 ## License
 
 `lazysammy` wraps SAM 2, which is licensed under the
 [Apache 2.0 License](https://github.com/facebookresearch/sam2/blob/main/LICENSE).
-This project is released under the same license — see [LICENSE](LICENSE).
+This project is released under the same license. See [LICENSE](LICENSE).
