@@ -190,6 +190,17 @@ class AutoMaskResult:
     masks: list[AutoMask]
     image_shape: tuple[int, int] | None = None
 
+    def __len__(self) -> int:
+        return len(self.masks)
+
+    def __iter__(self) -> Iterator[AutoMask]:
+        """Iterate over the generated masks (largest area first)."""
+        return iter(self.masks)
+
+    def __getitem__(self, index: int) -> AutoMask:
+        """Return the mask at *index*."""
+        return self.masks[index]
+
     def numpy(self) -> npt.NDArray[np.bool_]:
         """Stack all masks into ``(N, H, W)``."""
         if not self.masks:

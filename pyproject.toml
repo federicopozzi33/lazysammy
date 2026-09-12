@@ -110,9 +110,9 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not integration'"
 markers = [
-    "integration: end-to-end tests that download/load real SAM 2 weights (deselect with '-m \"not integration\"')",
+    "integration: end-to-end tests that download/load real SAM 2 weights (run with '-m integration')",
     "slow: tests that are noticeably slower than the unit suite",
 ]
 
