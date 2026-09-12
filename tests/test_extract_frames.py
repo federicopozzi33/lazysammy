@@ -69,9 +69,7 @@ class TestExtractFrames:
 class TestExtractFramesStaleOutput:
     """Regression: re-extraction silently mixed frames from two settings."""
 
-    def test_reextraction_mixes_stale_frames(
-        self, tmp_video_file: Path, tmp_path: Path
-    ) -> None:
+    def test_reextraction_mixes_stale_frames(self, tmp_video_file: Path, tmp_path: Path) -> None:
         out_dir = tmp_path / "frames"
         extract_frames(tmp_video_file, out_dir)  # 8 frames
         extract_frames(tmp_video_file, out_dir, max_frames=3)  # rewrites 0-2
@@ -79,18 +77,14 @@ class TestExtractFramesStaleOutput:
         # The leftover frames 3-7 are still present: this is the trap.
         assert len(list(out_dir.glob("*.jpg"))) == 8
 
-    def test_clean_removes_stale_frames(
-        self, tmp_video_file: Path, tmp_path: Path
-    ) -> None:
+    def test_clean_removes_stale_frames(self, tmp_video_file: Path, tmp_path: Path) -> None:
         out_dir = tmp_path / "frames"
         extract_frames(tmp_video_file, out_dir)  # 8 frames
         extract_frames(tmp_video_file, out_dir, max_frames=3, clean=True)
 
         assert len(list(out_dir.glob("*.jpg"))) == 3
 
-    def test_clean_only_removes_images(
-        self, tmp_video_file: Path, tmp_path: Path
-    ) -> None:
+    def test_clean_only_removes_images(self, tmp_video_file: Path, tmp_path: Path) -> None:
         out_dir = tmp_path / "frames"
         out_dir.mkdir()
         keep = out_dir / "notes.txt"
