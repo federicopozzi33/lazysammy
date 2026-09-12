@@ -52,7 +52,9 @@ from lazysammy.types import (
 )
 from lazysammy.utils import (
     extract_frames,
+    load_image,
     masks_to_colored_overlay,
+    natural_sort_key,
     save_masks_as_coco_rle,
     save_masks_as_npy,
     save_masks_as_png,
@@ -95,7 +97,9 @@ __all__ = [
     "draw_points_on_image",
     "extract_frames",
     "is_interactive_backend",
+    "load_image",
     "masks_to_colored_overlay",
+    "natural_sort_key",
     "pick_box_on_image",
     "pick_points_on_image",
     "preview_frame",

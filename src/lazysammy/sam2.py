@@ -110,11 +110,14 @@ class SAM2:
 
     @property
     def resolved_device(self) -> torch.device:
-        """The device that will actually be used (after auto-detection).
+        """The concrete device that will be used, after auto-detection.
 
-        Note: resolving inspects the runtime and may load no model weights,
-        but it does trigger lazy component creation only when a component
-        already exists.
+        Does not load any weights: it uses an already-created sub-component
+        when one exists, and otherwise resolves the device string the same
+        way the sub-components will.
+
+        Returns:
+            The resolved :class:`torch.device`.
         """
         if self._image_segmenter is not None:
             return self._image_segmenter.device

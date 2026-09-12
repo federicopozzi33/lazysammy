@@ -101,6 +101,19 @@ def _backend_name() -> str:
     return str(matplotlib.get_backend())
 
 
+def _set_coord_readout(ax: Any) -> None:
+    """Attach a live ``x=..., y=...`` readout to the axes' status bar.
+
+    Matplotlib types ``Axes.format_coord`` as a method, so assigning a
+    callable to it is flagged by type checkers. This wrapper centralises the
+    single, deliberate assignment.
+
+    Args:
+        ax: The matplotlib axes to annotate.
+    """
+    setattr(ax, "format_coord", lambda x, y: f"x={x:.0f}, y={y:.0f}")  # noqa: B010
+
+
 # ---------------------------------------------------------------------------
 # Standalone helpers (no session required)
 # ---------------------------------------------------------------------------
@@ -159,7 +172,7 @@ def preview_frame(
         ax.axis("off")
 
     # Live (x, y) in the status bar (interactive backends only)
-    ax.format_coord = lambda x, y: f"x={x:.0f}, y={y:.0f}"
+    _set_coord_readout(ax)
     fig.tight_layout()
     fig.canvas.draw_idle()
     plt.show()
@@ -201,7 +214,7 @@ def pick_points_on_image(
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     ax.imshow(img)
     ax.set_title(title or "Left=fg  Right=bg  Enter/q=done")
-    ax.format_coord = lambda x, y: f"x={x:.0f}, y={y:.0f}"
+    _set_coord_readout(ax)
 
     points: list[list[float]] = []
     labels: list[int] = []
@@ -292,7 +305,7 @@ def pick_box_on_image(
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     ax.imshow(img)
     ax.set_title(title or "Click two corners to draw a box (q=cancel)")
-    ax.format_coord = lambda x, y: f"x={x:.0f}, y={y:.0f}"
+    _set_coord_readout(ax)
 
     corners: list[list[float]] = []
     cids: list[int] = []
