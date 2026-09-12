@@ -12,7 +12,9 @@ Or::
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -20,22 +22,42 @@ import cv2
 import gradio as gr
 import numpy as np
 
-from lazysammy import SAM2, draw_masks_on_image, extract_frames, save_video_overlay_mp4
+from lazysammy import (
+    SAM2,
+    draw_masks_on_image,
+    extract_frames,
+    load_image,
+    natural_sort_key,
+    save_video_overlay_mp4,
+)
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
+_VIDEO_FRAME_EXTS = {".jpg", ".jpeg", ".png"}
 
 # ---------------------------------------------------------------------------
-# Global model cache (lazy — loaded once on first use per model size)
+# Global model cache (lazy — loaded once on first use per (model_size, device))
+#
+# SAM 2 predictors hold GPU memory and are not thread-safe, so construction is
+# guarded by a lock and every inference call is serialised through it. This
+# keeps concurrent Gradio requests from corrupting shared session state.
 # ---------------------------------------------------------------------------
 
 _MODEL_CACHE: dict[str, SAM2] = {}
+_MODEL_LOCK = threading.Lock()
 
 
 def _get_model(model_size: str) -> SAM2:
-    if model_size not in _MODEL_CACHE:
-        logger.info("Loading SAM2 model: %s", model_size)
-        _MODEL_CACHE[model_size] = SAM2(model_size)
-    return _MODEL_CACHE[model_size]
+    """Return a cached :class:`SAM2` for *model_size*, loading it if needed."""
+    with _MODEL_LOCK:
+        if model_size not in _MODEL_CACHE:
+            logger.info("Loading SAM2 model: %s", model_size)
+            _MODEL_CACHE[model_size] = SAM2(model_size)
+        return _MODEL_CACHE[model_size]
 
 
 # ---------------------------------------------------------------------------
@@ -43,8 +65,14 @@ def _get_model(model_size: str) -> SAM2:
 # ---------------------------------------------------------------------------
 
 _COLORS = [
-    (255, 0, 0), (0, 200, 0), (0, 80, 255), (255, 200, 0),
-    (255, 0, 200), (0, 200, 200), (180, 0, 0), (0, 160, 0),
+    (255, 0, 0),
+    (0, 200, 0),
+    (0, 80, 255),
+    (255, 200, 0),
+    (255, 0, 200),
+    (0, 200, 200),
+    (180, 0, 0),
+    (0, 160, 0),
 ]
 
 
@@ -66,10 +94,19 @@ def _draw_points_on_image(
         cv2.circle(out, (x, y), radius, color, -1)
         cv2.circle(out, (x, y), radius, (255, 255, 255), 2)
         tag = "+" if label == 1 else "-"
-        cv2.putText(out, tag, (x + radius + 2, y + 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(out, tag, (x + radius + 2, y + 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
+        cv2.putText(
+            out,
+            tag,
+            (x + radius + 2, y + 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            out, tag, (x + radius + 2, y + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA
+        )
     return out
 
 
@@ -82,8 +119,16 @@ def _draw_box_corners_on_image(
     if len(corners) >= 1:
         x1, y1 = int(corners[0][0]), int(corners[0][1])
         cv2.drawMarker(out, (x1, y1), (0, 200, 255), cv2.MARKER_CROSS, 16, 2)
-        cv2.putText(out, "corner 1", (x1 + 10, y1 - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1, cv2.LINE_AA)
+        cv2.putText(
+            out,
+            "corner 1",
+            (x1 + 10, y1 - 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 200, 255),
+            1,
+            cv2.LINE_AA,
+        )
     if len(corners) >= 2:
         x2, y2 = int(corners[1][0]), int(corners[1][1])
         bx1, by1 = min(x1, x2), min(y1, y2)
@@ -112,8 +157,14 @@ def _segment_with_points(
     coords = [[p[0], p[1]] for p in points]
     labels = [int(p[2]) for p in points]
 
-    sam = _get_model(model_size)
-    pred = sam.segment(image, points=coords, labels=labels, multimask_output=multimask)
+    try:
+        sam = _get_model(model_size)
+        with _MODEL_LOCK:
+            pred = sam.segment(image, points=coords, labels=labels, multimask_output=multimask)
+    except (ValueError, RuntimeError, OSError) as exc:
+        logger.exception("Point segmentation failed")
+        return image, f"❌ Segmentation failed: {exc}"
+
     best = pred.best_mask
     overlay = draw_masks_on_image(image, best.numpy()[np.newaxis], alpha=0.5)
     overlay = _draw_points_on_image(overlay, points)
@@ -135,8 +186,14 @@ def _segment_with_box(
     x1, y1 = min(box[0], box[2]), min(box[1], box[3])
     x2, y2 = max(box[0], box[2]), max(box[1], box[3])
 
-    sam = _get_model(model_size)
-    pred = sam.segment_box(image, x1, y1, x2, y2)
+    try:
+        sam = _get_model(model_size)
+        with _MODEL_LOCK:
+            pred = sam.segment_box(image, x1, y1, x2, y2)
+    except (ValueError, RuntimeError, OSError) as exc:
+        logger.exception("Box segmentation failed")
+        return image, f"❌ Segmentation failed: {exc}"
+
     best = pred.best_mask
     overlay = draw_masks_on_image(image, best.numpy()[np.newaxis], alpha=0.5)
     cv2.rectangle(overlay, (int(x1), int(y1)), (int(x2), int(y2)), (0, 200, 255), 2)
@@ -158,16 +215,21 @@ def _auto_segment_image(
     if image is None:
         return None, "Upload an image first."
 
-    sam = _get_model(model_size)
-    result = sam.auto_segment(image)
+    try:
+        sam = _get_model(model_size)
+        with _MODEL_LOCK:
+            result = sam.auto_segment(image)
+    except (ValueError, RuntimeError, OSError) as exc:
+        logger.exception("Auto segmentation failed")
+        return image, f"❌ Auto segmentation failed: {exc}"
 
     if min_area > 0:
-        result = result.filter_by_area(min_area=min_area)
+        result = result.filter_by_area(min_area=int(min_area))
     if min_iou > 0:
-        result = result.filter_by_iou(min_iou=min_iou)
+        result = result.filter_by_iou(min_iou=float(min_iou))
 
     if not result.masks:
-        return image, "No masks found with current filters."
+        return image, "No masks found with the current filters."
 
     all_masks = result.numpy()
     overlay = draw_masks_on_image(image, all_masks, alpha=0.4)
@@ -185,26 +247,37 @@ def _extract_video_frames(
     every_n: int,
     max_frames: int,
 ) -> tuple[list[str], str, str | None, int]:
+    """Extract frames from an uploaded video and return their paths."""
     if not video_path:
         return [], "Upload a video first.", None, 0
 
-    frames_dir = extract_frames(video_path, every_n=every_n, max_frames=max_frames or None)
-    frame_files = sorted(
-        [str(f) for f in Path(frames_dir).iterdir()
-         if f.suffix.lower() in {".jpg", ".jpeg", ".png"}]
-    )
-    if not frame_files:
-        return [], "No frames extracted.", None, 0
+    try:
+        frames_dir = extract_frames(
+            video_path, every_n=int(every_n), max_frames=int(max_frames) or None
+        )
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        return [], f"❌ Frame extraction failed: {exc}", None, 0
 
-    info = f"Extracted {len(frame_files)} frames to {frames_dir}"
-    return frame_files, info, str(frames_dir), len(frame_files)
+    frame_paths = sorted(
+        (f for f in Path(frames_dir).iterdir() if f.suffix.lower() in _VIDEO_FRAME_EXTS),
+        key=natural_sort_key,
+    )
+    if not frame_paths:
+        return [], "No frames were extracted from this video.", None, 0
+
+    info = f"Extracted {len(frame_paths)} frames to {frames_dir}"
+    return [str(f) for f in frame_paths], info, str(frames_dir), len(frame_paths)
 
 
 def _get_frame_image(frame_files: list[str], frame_idx: int) -> np.ndarray | None:
+    """Load frame *frame_idx* from *frame_files* as an RGB array."""
     if not frame_files or frame_idx < 0 or frame_idx >= len(frame_files):
         return None
-    img = cv2.imread(frame_files[frame_idx])
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img is not None else None
+    try:
+        return load_image(frame_files[frame_idx])
+    except (FileNotFoundError, ValueError) as exc:
+        logger.warning("Could not load frame %s: %s", frame_idx, exc)
+        return None
 
 
 def _draw_video_prompts(
@@ -222,22 +295,54 @@ def _draw_video_prompts(
         color = _color_for_obj(prompt["obj_id"])
         oid = prompt["obj_id"]
         if prompt["type"] == "point":
-            for pt, lab in zip(prompt["points"], prompt["labels"]):
+            for pt, lab in zip(prompt["points"], prompt["labels"], strict=False):
                 c = color if lab == 1 else (128, 128, 128)
                 cv2.circle(out, (int(pt[0]), int(pt[1])), 7, c, -1)
                 cv2.circle(out, (int(pt[0]), int(pt[1])), 7, (255, 255, 255), 2)
                 tag = f"obj{oid}+" if lab == 1 else f"obj{oid}-"
-                cv2.putText(out, tag, (int(pt[0]) + 10, int(pt[1]) - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 2, cv2.LINE_AA)
-                cv2.putText(out, tag, (int(pt[0]) + 10, int(pt[1]) - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+                cv2.putText(
+                    out,
+                    tag,
+                    (int(pt[0]) + 10, int(pt[1]) - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    out,
+                    tag,
+                    (int(pt[0]) + 10, int(pt[1]) - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    color,
+                    1,
+                    cv2.LINE_AA,
+                )
         elif prompt["type"] == "box":
             bx = prompt["box"]
             cv2.rectangle(out, (int(bx[0]), int(bx[1])), (int(bx[2]), int(bx[3])), color, 2)
-            cv2.putText(out, f"obj{oid}", (int(bx[0]) + 4, int(bx[1]) - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(out, f"obj{oid}", (int(bx[0]) + 4, int(bx[1]) - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+            cv2.putText(
+                out,
+                f"obj{oid}",
+                (int(bx[0]) + 4, int(bx[1]) - 6),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                out,
+                f"obj{oid}",
+                (int(bx[0]) + 4, int(bx[1]) - 6),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
     return out
 
 
@@ -247,7 +352,7 @@ def _format_prompts(prompts: list[dict]) -> str:
         if p["type"] == "point":
             pts = ", ".join(
                 f"({pt[0]:.0f},{pt[1]:.0f}){'fg' if lb == 1 else 'bg'}"
-                for pt, lb in zip(p["points"], p["labels"])
+                for pt, lb in zip(p["points"], p["labels"], strict=False)
             )
             lines.append(f"[{i}] Frame {p['frame_idx']} | Obj {p['obj_id']} | points: {pts}")
         elif p["type"] == "box":
@@ -264,15 +369,13 @@ def _format_prompts_html(prompts: list[dict]) -> str:
     if not prompts:
         return (
             '<div class="prompt-summary"><em>No prompts yet — '
-            'click on the frame below to start.</em></div>'
+            "click on the frame below to start.</em></div>"
         )
 
     # Gather stats
     obj_ids = sorted({p["obj_id"] for p in prompts})
     frames_used = sorted({p["frame_idx"] for p in prompts})
-    n_points = sum(
-        len(p["points"]) for p in prompts if p["type"] == "point"
-    )
+    n_points = sum(len(p["points"]) for p in prompts if p["type"] == "point")
     n_boxes = sum(1 for p in prompts if p["type"] == "box")
 
     header = (
@@ -282,21 +385,20 @@ def _format_prompts_html(prompts: list[dict]) -> str:
     )
 
     rows = []
-    for i, p in enumerate(prompts):
+    for p in prompts:
         color = "#{:02x}{:02x}{:02x}".format(*_color_for_obj(p["obj_id"]))
         badge = (
             f'<span style="display:inline-block;width:10px;height:10px;'
             f'border-radius:50%;background:{color};margin-right:4px"></span>'
         )
         if p["type"] == "point":
+            fg_tag = '<span style="color:green">fg</span>'
+            bg_tag = '<span style="color:red">bg</span>'
             pts = ", ".join(
-                f"({pt[0]:.0f},{pt[1]:.0f}) "
-                f"{'<span style=\"color:green\">fg</span>' if lb == 1 else '<span style=\"color:red\">bg</span>'}"
-                for pt, lb in zip(p["points"], p["labels"])
+                f"({pt[0]:.0f},{pt[1]:.0f}) {fg_tag if lb == 1 else bg_tag}"
+                for pt, lb in zip(p["points"], p["labels"], strict=False)
             )
-            rows.append(
-                f"{badge}Obj {p['obj_id']} · Frame {p['frame_idx']} · {pts}"
-            )
+            rows.append(f"{badge}Obj {p['obj_id']} · Frame {p['frame_idx']} · {pts}")
         elif p["type"] == "box":
             b = p["box"]
             rows.append(
@@ -309,60 +411,69 @@ def _format_prompts_html(prompts: list[dict]) -> str:
 
 
 def _track_and_render(
-    video_path: str | None,
     frames_dir_str: str | None,
     prompts_state: list[dict[str, Any]],
     model_size: str,
-    every_n: int,
-    max_frames: int,
     fps: float,
     alpha: float,
     bidirectional: bool,
 ) -> tuple[str | None, str]:
+    """Build a tracking session from the accumulated prompts and render an MP4."""
     if not frames_dir_str:
         return None, "Extract frames first."
     if not prompts_state:
         return None, "Add at least one prompt before tracking."
 
     frames_dir = Path(frames_dir_str)
-    sam = _get_model(model_size)
-    session = sam.video(frames_dir, offload_video_to_cpu=True)
+    if not frames_dir.is_dir():
+        return None, f"Frame directory is gone: {frames_dir}"
 
-    for prompt in prompts_state:
-        ptype = prompt["type"]
-        if ptype == "point":
-            session.add_points(
-                frame_idx=prompt["frame_idx"],
-                obj_id=prompt["obj_id"],
-                points=prompt["points"],
-                labels=prompt["labels"],
+    try:
+        sam = _get_model(model_size)
+        with _MODEL_LOCK:
+            session = sam.video(frames_dir, offload_video_to_cpu=True)
+
+            for prompt in prompts_state:
+                ptype = prompt["type"]
+                if ptype == "point":
+                    session.add_points(
+                        frame_idx=prompt["frame_idx"],
+                        obj_id=prompt["obj_id"],
+                        points=prompt["points"],
+                        labels=prompt["labels"],
+                    )
+                elif ptype == "box":
+                    session.add_box(
+                        frame_idx=prompt["frame_idx"],
+                        obj_id=prompt["obj_id"],
+                        box=prompt["box"],
+                    )
+
+            if bidirectional:
+                results = session.propagate_bidirectional()
+                direction = "bidirectional"
+            else:
+                results = session.propagate()
+                direction = "forward"
+
+            # Gradio needs a concrete file, so write to a stable path we control
+            # and clean up on failure.
+            out_path = Path(tempfile.mkdtemp(prefix="lazysammy_")) / "tracking.mp4"
+            save_video_overlay_mp4(
+                frames_dir,
+                results,
+                out_path,
+                fps=float(fps),
+                alpha=float(alpha),
+                show_ids=True,
+                show_frame_number=True,
             )
-        elif ptype == "box":
-            session.add_box(
-                frame_idx=prompt["frame_idx"],
-                obj_id=prompt["obj_id"],
-                box=prompt["box"],
-            )
+    except (ValueError, RuntimeError, IndexError, OSError) as exc:
+        logger.exception("Tracking failed")
+        return None, f"❌ Tracking failed: {exc}"
 
-    if bidirectional:
-        results = session.propagate_bidirectional()
-        direction = "bidirectional"
-    else:
-        results = session.propagate()
-        direction = "forward"
-
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-        out_path = f.name
-    save_video_overlay_mp4(
-        frames_dir, results, out_path,
-        fps=fps, alpha=alpha, show_ids=True, show_frame_number=True,
-    )
-
-    info = (
-        f"Tracked {len(results.object_ids)} object(s) across "
-        f"{len(results)} frames ({direction})"
-    )
-    return out_path, info
+    info = f"Tracked {len(results.object_ids)} object(s) across {len(results)} frames ({direction})"
+    return str(out_path), info
 
 
 # =========================================================================
@@ -398,39 +509,61 @@ def _render_mode_instruction(mode: str) -> str:
     if "Foreground" in mode:
         return (
             '<div class="click-instruction click-fg">'
-            '🟢 Click on the image to add <b>foreground</b> points '
-            '(objects to include)</div>'
+            "🟢 Click on the image to add <b>foreground</b> points "
+            "(objects to include)</div>"
         )
     elif "Background" in mode:
         return (
             '<div class="click-instruction click-bg">'
-            '🔴 Click on the image to add <b>background</b> points '
-            '(areas to exclude)</div>'
+            "🔴 Click on the image to add <b>background</b> points "
+            "(areas to exclude)</div>"
         )
     else:
         return (
             '<div class="click-instruction click-box">'
-            '📦 Click <b>two corners</b> on the image to define a '
-            'bounding box</div>'
+            "📦 Click <b>two corners</b> on the image to define a "
+            "bounding box</div>"
         )
 
 
-def build_app() -> gr.Blocks:
-    """Construct and return the Gradio Blocks app."""
+def _gradio_major_version() -> int:
+    """Return the installed Gradio major version (0 when undetectable)."""
+    raw = getattr(gr, "__version__", "") or ""
+    try:
+        return int(str(raw).split(".")[0])
+    except (ValueError, IndexError):
+        return 0
 
-    with gr.Blocks(title="lazysammy Demo", theme=gr.themes.Soft(), css=_CSS) as app:
+
+def build_app() -> gr.Blocks:
+    """Construct and return the Gradio Blocks app.
+
+    Gradio 6 moved ``theme`` and ``css`` from the ``Blocks`` constructor to
+    ``launch()``. This builds the layout in a way that works on both.
+
+    Returns:
+        The assembled :class:`gradio.Blocks` application.
+    """
+    blocks_kwargs: dict[str, Any] = {"title": "lazysammy Demo"}
+    if _gradio_major_version() < 6:
+        blocks_kwargs["theme"] = gr.themes.Soft()
+        blocks_kwargs["css"] = _CSS
+
+    with gr.Blocks(**blocks_kwargs) as app:  # type: ignore[arg-type]
         gr.Markdown(
             "# 🎯 lazysammy Demo\n"
             "Interactive segmentation & video tracking powered by "
-            "[SAM 2](https://github.com/facebookresearch/sam2) via "
-            "[lazysammy](https://github.com/fpozzi/lazysammy)."
+            "[SAM 2](https://github.com/facebookresearch/sam2) through "
+            "[lazysammy](https://github.com/federicopozzi33/easier-sam2).\n\n"
+            "**Tip:** start with `tiny` or `small` for fast iteration, then "
+            "switch to `large` for best quality."
         )
 
         model_size = gr.Dropdown(
             choices=["tiny", "small", "base_plus", "large"],
-            value="large",
+            value="small",
             label="Model Size",
-            info="Larger = more accurate but slower.",
+            info="Larger = more accurate but slower and heavier.",
         )
 
         # ==============================================================
@@ -456,12 +589,11 @@ def build_app() -> gr.Blocks:
                     info="Select what happens when you click on the image.",
                 )
                 multimask_toggle = gr.Checkbox(
-                    label="Multi-mask output", value=True,
+                    label="Multi-mask output",
+                    value=True,
                 )
 
-            click_instruction = gr.HTML(
-                _render_mode_instruction("➕ Foreground point")
-            )
+            click_instruction = gr.HTML(_render_mode_instruction("➕ Foreground point"))
 
             # -- Images side-by-side --
             with gr.Row():
@@ -473,19 +605,22 @@ def build_app() -> gr.Blocks:
                     )
                 with gr.Column(scale=1):
                     img_output = gr.Image(
-                        label="Segmentation Result", height=512,
+                        label="Segmentation Result",
+                        height=512,
                     )
                     img_info = gr.Textbox(label="Info", interactive=False)
 
             # -- Hidden states --
-            points_state = gr.State([])       # [[x, y, label], ...]
-            box_state = gr.State([])           # [[x,y], [x,y]]
-            current_img_state = gr.State(None) # clean original image
+            points_state = gr.State([])  # [[x, y, label], ...]
+            box_state = gr.State([])  # [[x,y], [x,y]]
+            current_img_state = gr.State(None)  # clean original image
 
             # -- Action buttons --
             with gr.Row():
                 segment_btn = gr.Button(
-                    "🔍 Segment", variant="primary", size="lg",
+                    "🔍 Segment",
+                    variant="primary",
+                    size="lg",
                 )
                 undo_btn = gr.Button("↩ Undo Last", variant="secondary")
                 clear_btn = gr.Button("🗑 Clear All", variant="stop")
@@ -499,24 +634,24 @@ def build_app() -> gr.Blocks:
 
             # ---- Image tab helpers ----
 
-            def _format_img_prompts(pts, box):
+            def _format_img_prompts(pts: list[Any], box: list[Any]) -> str:
                 parts = []
                 for p in pts:
                     kind = "fg" if int(p[2]) == 1 else "bg"
                     parts.append(f"({p[0]:.0f}, {p[1]:.0f}) {kind}")
                 if len(box) == 1:
                     parts.append(
-                        f"box corner 1: ({box[0][0]:.0f}, {box[0][1]:.0f}) "
-                        "— click 2nd corner"
+                        f"box corner 1: ({box[0][0]:.0f}, {box[0][1]:.0f}) — click 2nd corner"
                     )
                 if len(box) >= 2:
                     parts.append(
-                        f"box: ({box[0][0]:.0f},{box[0][1]:.0f})"
-                        f"→({box[1][0]:.0f},{box[1][1]:.0f})"
+                        f"box: ({box[0][0]:.0f},{box[0][1]:.0f})→({box[1][0]:.0f},{box[1][1]:.0f})"
                     )
                 return " | ".join(parts) if parts else ""
 
-            def _redraw_input(original, pts, box):
+            def _redraw_input(
+                original: np.ndarray | None, pts: list[Any], box: list[Any]
+            ) -> np.ndarray | None:
                 if original is None:
                     return None
                 out = original.copy()
@@ -528,7 +663,9 @@ def build_app() -> gr.Blocks:
 
             # ---- Image tab events ----
 
-            def _on_image_upload(img):
+            def _on_image_upload(
+                img: np.ndarray | None,
+            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
                 return img, [], [], _render_mode_instruction("➕ Foreground point")
 
             img_input.change(
@@ -543,18 +680,24 @@ def build_app() -> gr.Blocks:
                 outputs=[click_instruction],
             )
 
-            def _on_image_click(original, points, box_corners, mode, evt: gr.SelectData):
+            def _on_image_click(
+                original: np.ndarray | None,
+                points: list[Any],
+                box_corners: list[Any],
+                mode: str,
+                evt: gr.SelectData,
+            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
                 if original is None:
                     return original, points, box_corners, ""
                 x, y = evt.index[0], evt.index[1]
 
                 if "Box" in mode:
-                    box_corners = box_corners + [[x, y]]
+                    box_corners = [*box_corners, [x, y]]
                     if len(box_corners) > 2:
                         box_corners = [[x, y]]
                 else:
                     label = 1 if "Foreground" in mode else 0
-                    points = points + [[x, y, label]]
+                    points = [*points, [x, y, label]]
 
                 display = _format_img_prompts(points, box_corners)
                 annotated = _redraw_input(original, points, box_corners)
@@ -566,7 +709,12 @@ def build_app() -> gr.Blocks:
                 outputs=[img_input, points_state, box_state, points_display],
             )
 
-            def _undo(original, points, box_corners, mode):
+            def _undo(
+                original: np.ndarray | None,
+                points: list[Any],
+                box_corners: list[Any],
+                mode: str,
+            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
                 if "Box" in mode:
                     box_corners = box_corners[:-1] if box_corners else []
                 else:
@@ -581,7 +729,9 @@ def build_app() -> gr.Blocks:
                 outputs=[img_input, points_state, box_state, points_display],
             )
 
-            def _clear_all(original):
+            def _clear_all(
+                original: np.ndarray | None,
+            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
                 out = original.copy() if original is not None else None
                 return out, [], [], ""
 
@@ -591,14 +741,22 @@ def build_app() -> gr.Blocks:
                 outputs=[img_input, points_state, box_state, points_display],
             )
 
-            def _segment(original, points, box_corners, ms, multimask):
+            def _segment(
+                original: np.ndarray | None,
+                points: list[Any],
+                box_corners: list[Any],
+                ms: str,
+                multimask: bool,
+            ) -> tuple[np.ndarray | None, str]:
                 if original is None:
                     return None, "Upload an image first."
                 # Prefer box if two corners are set
                 if len(box_corners) >= 2:
                     flat = [
-                        box_corners[0][0], box_corners[0][1],
-                        box_corners[1][0], box_corners[1][1],
+                        box_corners[0][0],
+                        box_corners[0][1],
+                        box_corners[1][0],
+                        box_corners[1][1],
                     ]
                     return _segment_with_box(original, flat, ms)
                 if points:
@@ -608,8 +766,11 @@ def build_app() -> gr.Blocks:
             segment_btn.click(
                 fn=_segment,
                 inputs=[
-                    current_img_state, points_state, box_state,
-                    model_size, multimask_toggle,
+                    current_img_state,
+                    points_state,
+                    box_state,
+                    model_size,
+                    multimask_toggle,
                 ],
                 outputs=[img_output, img_info],
             )
@@ -620,21 +781,28 @@ def build_app() -> gr.Blocks:
 
         with gr.Tab("✨ Auto Segment"):
             gr.Markdown(
-                "Upload an image to automatically segment **every object** — "
-                "no prompts needed."
+                "Upload an image to automatically segment **every object** — no prompts needed."
             )
             with gr.Row():
                 with gr.Column(scale=1):
                     auto_img_input = gr.Image(
-                        label="Input Image", type="numpy", height=480,
+                        label="Input Image",
+                        type="numpy",
+                        height=480,
                     )
                     with gr.Row():
                         auto_min_area = gr.Slider(
-                            minimum=0, maximum=50_000, step=100, value=0,
+                            minimum=0,
+                            maximum=50_000,
+                            step=100,
+                            value=0,
                             label="Min mask area (px)",
                         )
                         auto_min_iou = gr.Slider(
-                            minimum=0.0, maximum=1.0, step=0.05, value=0.7,
+                            minimum=0.0,
+                            maximum=1.0,
+                            step=0.05,
+                            value=0.7,
                             label="Min predicted IoU",
                         )
                     auto_btn = gr.Button("✨ Auto Segment", variant="primary")
@@ -677,16 +845,23 @@ def build_app() -> gr.Blocks:
                         video_input = gr.Video(label="Upload Video")
                     with gr.Column(scale=1):
                         extract_every_n = gr.Slider(
-                            minimum=1, maximum=30, step=1, value=1,
+                            minimum=1,
+                            maximum=30,
+                            step=1,
+                            value=1,
                             label="Extract every N-th frame",
                             info="Use higher values for long videos to speed up extraction.",
                         )
                         extract_max = gr.Slider(
-                            minimum=0, maximum=500, step=10, value=200,
+                            minimum=0,
+                            maximum=500,
+                            step=10,
+                            value=200,
                             label="Max frames (0 = all)",
                         )
                         extract_btn = gr.Button(
-                            "📂 Extract Frames", variant="primary",
+                            "📂 Extract Frames",
+                            variant="primary",
                         )
                 extract_info = gr.Textbox(label="Status", interactive=False)
 
@@ -698,16 +873,20 @@ def build_app() -> gr.Blocks:
                     # Left column: frame navigation + click controls
                     with gr.Column(scale=1):
                         frame_slider = gr.Slider(
-                            minimum=0, maximum=1, step=1, value=0,
-                            label="Frame", interactive=True,
+                            minimum=0,
+                            maximum=1,
+                            step=1,
+                            value=0,
+                            label="Frame",
+                            interactive=True,
                         )
-                        frame_counter_html = gr.HTML(
-                            '<div class="frame-counter">Frame 0 / 0</div>'
-                        )
+                        frame_counter_html = gr.HTML('<div class="frame-counter">Frame 0 / 0</div>')
                         with gr.Row():
                             vid_prompt_obj_id = gr.Number(
-                                label="Object ID", value=1, precision=0,
-                                info="Give each object a unique ID (different ID = different colour).",
+                                label="Object ID",
+                                value=1,
+                                precision=0,
+                                info="Each unique ID gets its own colour.",
                             )
                             vid_prompt_mode = gr.Radio(
                                 choices=[
@@ -718,22 +897,24 @@ def build_app() -> gr.Blocks:
                                 value="➕ Foreground",
                                 label="Click Mode",
                             )
-                        vid_click_instruction = gr.HTML(
-                            _render_mode_instruction("➕ Foreground")
-                        )
+                        vid_click_instruction = gr.HTML(_render_mode_instruction("➕ Foreground"))
 
                     # Right column: prompt list + actions
                     with gr.Column(scale=1):
                         vid_prompts_display = gr.HTML(
                             '<div class="prompt-summary"><em>No prompts yet — '
-                            'click on the frame below to start.</em></div>'
+                            "click on the frame below to start.</em></div>"
                         )
                         with gr.Row():
                             vid_undo_btn = gr.Button(
-                                "↩ Undo Last", variant="secondary", size="sm",
+                                "↩ Undo Last",
+                                variant="secondary",
+                                size="sm",
                             )
                             vid_clear_btn = gr.Button(
-                                "🗑 Clear All Prompts", variant="stop", size="sm",
+                                "🗑 Clear All Prompts",
+                                variant="stop",
+                                size="sm",
                             )
 
                 frame_preview = gr.Image(
@@ -758,16 +939,23 @@ def build_app() -> gr.Blocks:
                         )
                         with gr.Row():
                             track_fps = gr.Slider(
-                                minimum=1, maximum=60, step=1, value=24,
+                                minimum=1,
+                                maximum=60,
+                                step=1,
+                                value=24,
                                 label="Output FPS",
                             )
                             track_alpha = gr.Slider(
-                                minimum=0.0, maximum=1.0, step=0.05, value=0.5,
+                                minimum=0.0,
+                                maximum=1.0,
+                                step=0.05,
+                                value=0.5,
                                 label="Overlay Alpha",
                             )
                         track_btn = gr.Button(
                             "🚀 Track & Render Video",
-                            variant="primary", size="lg",
+                            variant="primary",
+                            size="lg",
                         )
                         track_info = gr.Textbox(label="Status", interactive=False)
                     with gr.Column(scale=1):
@@ -775,34 +963,72 @@ def build_app() -> gr.Blocks:
 
             # ---- Video tab events ----
 
-            def _on_extract(video_path, every_n, max_frames):
+            def _on_extract(
+                video_path: str | None, every_n: int, max_frames: int
+            ) -> tuple[
+                list[str],
+                str,
+                str | None,
+                int,
+                Any,
+                np.ndarray | None,
+                np.ndarray | None,
+                list[Any],
+                list[Any],
+                str,
+                str,
+            ]:
                 ff, info, fd, nf = _extract_video_frames(
-                    video_path, every_n, int(max_frames) or 0,
+                    video_path,
+                    every_n,
+                    int(max_frames) or 0,
                 )
                 first = _get_frame_image(ff, 0)
                 slider_update = gr.Slider(maximum=max(0, nf - 1), value=0)
                 counter = f'<div class="frame-counter">Frame 0 / {max(0, nf - 1)}</div>'
                 empty_prompts = (
                     '<div class="prompt-summary"><em>No prompts yet — '
-                    'click on the frame below to start.</em></div>'
+                    "click on the frame below to start.</em></div>"
                 )
                 return (
-                    ff, info, fd, nf, slider_update, first, first,
-                    [], [], counter, empty_prompts,
+                    ff,
+                    info,
+                    fd,
+                    nf,
+                    slider_update,
+                    first,
+                    first,
+                    [],
+                    [],
+                    counter,
+                    empty_prompts,
                 )
 
             extract_btn.click(
                 fn=_on_extract,
                 inputs=[video_input, extract_every_n, extract_max],
                 outputs=[
-                    frame_files_state, extract_info, frames_dir_state,
-                    num_frames_state, frame_slider, frame_preview,
-                    clean_frame_state, video_prompts_state, vid_box_state,
-                    frame_counter_html, vid_prompts_display,
+                    frame_files_state,
+                    extract_info,
+                    frames_dir_state,
+                    num_frames_state,
+                    frame_slider,
+                    frame_preview,
+                    clean_frame_state,
+                    video_prompts_state,
+                    vid_box_state,
+                    frame_counter_html,
+                    vid_prompts_display,
                 ],
             )
 
-            def _on_slider_change(frame_files, idx, prompts, vid_box, num_frames):
+            def _on_slider_change(
+                frame_files: list[str],
+                idx: int,
+                prompts: list[Any],
+                vid_box: list[Any],
+                num_frames: int,
+            ) -> tuple[np.ndarray | None, np.ndarray | None, str]:
                 idx = int(idx)
                 total = max(0, int(num_frames) - 1)
                 clean = _get_frame_image(frame_files, idx)
@@ -815,8 +1041,10 @@ def build_app() -> gr.Blocks:
             frame_slider.change(
                 fn=_on_slider_change,
                 inputs=[
-                    frame_files_state, frame_slider,
-                    video_prompts_state, vid_box_state,
+                    frame_files_state,
+                    frame_slider,
+                    video_prompts_state,
+                    vid_box_state,
                     num_frames_state,
                 ],
                 outputs=[frame_preview, clean_frame_state, frame_counter_html],
@@ -829,10 +1057,15 @@ def build_app() -> gr.Blocks:
             )
 
             def _on_frame_click(
-                clean_frame, frame_files, prompts, vid_box,
-                frame_slider_val, obj_id, mode,
+                clean_frame: np.ndarray | None,
+                frame_files: list[str],
+                prompts: list[Any],
+                vid_box: list[Any],
+                frame_slider_val: int,
+                obj_id: int,
+                mode: str,
                 evt: gr.SelectData,
-            ):
+            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
                 if clean_frame is None:
                     return None, prompts, vid_box, _format_prompts_html(prompts)
 
@@ -841,18 +1074,21 @@ def build_app() -> gr.Blocks:
                 obj_id = int(obj_id)
 
                 if "Box" in mode:
-                    vid_box = vid_box + [[x, y]]
+                    vid_box = [*vid_box, [x, y]]
                     if len(vid_box) == 2:
                         bx1 = min(vid_box[0][0], vid_box[1][0])
                         by1 = min(vid_box[0][1], vid_box[1][1])
                         bx2 = max(vid_box[0][0], vid_box[1][0])
                         by2 = max(vid_box[0][1], vid_box[1][1])
-                        prompts = prompts + [{
-                            "type": "box",
-                            "frame_idx": frame_idx,
-                            "obj_id": obj_id,
-                            "box": [bx1, by1, bx2, by2],
-                        }]
+                        prompts = [
+                            *prompts,
+                            {
+                                "type": "box",
+                                "frame_idx": frame_idx,
+                                "obj_id": obj_id,
+                                "box": [bx1, by1, bx2, by2],
+                            },
+                        ]
                         vid_box = []
                     elif len(vid_box) > 2:
                         vid_box = [[x, y]]
@@ -860,27 +1096,31 @@ def build_app() -> gr.Blocks:
                     label = 1 if "Foreground" in mode else 0
                     existing = None
                     for p in prompts:
-                        if (p["type"] == "point"
-                                and p["frame_idx"] == frame_idx
-                                and p["obj_id"] == obj_id):
+                        if (
+                            p["type"] == "point"
+                            and p["frame_idx"] == frame_idx
+                            and p["obj_id"] == obj_id
+                        ):
                             existing = p
                             break
                     if existing is not None:
                         prompts = [
-                            {**p,
-                             "points": p["points"] + [[x, y]],
-                             "labels": p["labels"] + [label]}
-                            if p is existing else p
+                            {**p, "points": [*p["points"], [x, y]], "labels": [*p["labels"], label]}
+                            if p is existing
+                            else p
                             for p in prompts
                         ]
                     else:
-                        prompts = prompts + [{
-                            "type": "point",
-                            "frame_idx": frame_idx,
-                            "obj_id": obj_id,
-                            "points": [[x, y]],
-                            "labels": [label],
-                        }]
+                        prompts = [
+                            *prompts,
+                            {
+                                "type": "point",
+                                "frame_idx": frame_idx,
+                                "obj_id": obj_id,
+                                "points": [[x, y]],
+                                "labels": [label],
+                            },
+                        ]
 
                 display = _format_prompts_html(prompts)
                 annotated = _draw_video_prompts(clean_frame, prompts, frame_idx)
@@ -891,28 +1131,43 @@ def build_app() -> gr.Blocks:
             frame_preview.select(
                 fn=_on_frame_click,
                 inputs=[
-                    clean_frame_state, frame_files_state,
-                    video_prompts_state, vid_box_state,
-                    frame_slider, vid_prompt_obj_id, vid_prompt_mode,
+                    clean_frame_state,
+                    frame_files_state,
+                    video_prompts_state,
+                    vid_box_state,
+                    frame_slider,
+                    vid_prompt_obj_id,
+                    vid_prompt_mode,
                 ],
                 outputs=[
-                    frame_preview, video_prompts_state,
-                    vid_box_state, vid_prompts_display,
+                    frame_preview,
+                    video_prompts_state,
+                    vid_box_state,
+                    vid_prompts_display,
                 ],
             )
 
-            def _vid_undo(clean_frame, prompts, vid_box, frame_slider_val, mode):
+            def _vid_undo(
+                clean_frame: np.ndarray | None,
+                prompts: list[Any],
+                vid_box: list[Any],
+                frame_slider_val: int,
+                mode: str,
+            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
                 frame_idx = int(frame_slider_val)
                 if "Box" in mode and vid_box:
                     vid_box = vid_box[:-1]
                 elif prompts:
                     last = prompts[-1]
                     if last["type"] == "point" and len(last["points"]) > 1:
-                        prompts = prompts[:-1] + [{
-                            **last,
-                            "points": last["points"][:-1],
-                            "labels": last["labels"][:-1],
-                        }]
+                        prompts = [
+                            *prompts[:-1],
+                            {
+                                **last,
+                                "points": last["points"][:-1],
+                                "labels": last["labels"][:-1],
+                            },
+                        ]
                     else:
                         prompts = prompts[:-1]
                 display = _format_prompts_html(prompts)
@@ -924,19 +1179,26 @@ def build_app() -> gr.Blocks:
             vid_undo_btn.click(
                 fn=_vid_undo,
                 inputs=[
-                    clean_frame_state, video_prompts_state,
-                    vid_box_state, frame_slider, vid_prompt_mode,
+                    clean_frame_state,
+                    video_prompts_state,
+                    vid_box_state,
+                    frame_slider,
+                    vid_prompt_mode,
                 ],
                 outputs=[
-                    frame_preview, video_prompts_state,
-                    vid_box_state, vid_prompts_display,
+                    frame_preview,
+                    video_prompts_state,
+                    vid_box_state,
+                    vid_prompts_display,
                 ],
             )
 
-            def _vid_clear(clean_frame):
+            def _vid_clear(
+                clean_frame: np.ndarray | None,
+            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
                 empty = (
                     '<div class="prompt-summary"><em>No prompts yet — '
-                    'click on the frame below to start.</em></div>'
+                    "click on the frame below to start.</em></div>"
                 )
                 return clean_frame, [], [], empty
 
@@ -944,17 +1206,22 @@ def build_app() -> gr.Blocks:
                 fn=_vid_clear,
                 inputs=[clean_frame_state],
                 outputs=[
-                    frame_preview, video_prompts_state,
-                    vid_box_state, vid_prompts_display,
+                    frame_preview,
+                    video_prompts_state,
+                    vid_box_state,
+                    vid_prompts_display,
                 ],
             )
 
             track_btn.click(
                 fn=_track_and_render,
                 inputs=[
-                    video_input, frames_dir_state, video_prompts_state,
-                    model_size, extract_every_n, extract_max,
-                    track_fps, track_alpha, track_bidirectional,
+                    frames_dir_state,
+                    video_prompts_state,
+                    model_size,
+                    track_fps,
+                    track_alpha,
+                    track_bidirectional,
                 ],
                 outputs=[track_output, track_info],
             )
@@ -968,4 +1235,19 @@ def build_app() -> gr.Blocks:
 
 if __name__ == "__main__":
     demo = build_app()
-    demo.launch(server_name="0.0.0.0", server_port=7860, share=False)
+    # Bind to localhost by default. Set LAZYSAMMY_DEMO_HOST=0.0.0.0 (and pass
+    # --share or a tunnel) if you deliberately want to expose the app on your
+    # network — a segmentation demo loads multi-GB models on demand.
+    host = os.environ.get("LAZYSAMMY_DEMO_HOST", "127.0.0.1")
+    port = int(os.environ.get("LAZYSAMMY_DEMO_PORT", "7860"))
+
+    launch_kwargs: dict[str, Any] = {
+        "server_name": host,
+        "server_port": port,
+        "share": False,
+    }
+    if _gradio_major_version() >= 6:
+        launch_kwargs["theme"] = gr.themes.Soft()
+        launch_kwargs["css"] = _CSS
+
+    demo.launch(**launch_kwargs)  # type: ignore[arg-type]

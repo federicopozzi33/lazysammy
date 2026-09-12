@@ -1,0 +1,42 @@
+---
+name: Bug report
+about: Report something that is broken or behaves unexpectedly
+title: "[Bug] "
+labels: bug
+---
+
+## What happened?
+
+<!-- A clear description of the bug. -->
+
+## What did you expect?
+
+<!-- What you expected to happen instead. -->
+
+## Reproduction
+
+<!-- The smallest snippet that reproduces the problem. -->
+
+```python
+from lazysammy import SAM2
+
+sam = SAM2("large")
+# ...
+```
+
+## Environment
+
+- lazysammy version:
+- Python version:
+- torch version:
+- Device (CUDA / MPS / CPU):
+- Model size (tiny / small / base_plus / large):
+- OS:
+
+## Traceback
+
+<!-- Paste the full traceback if there is one. -->
+
+```text
+
+```
