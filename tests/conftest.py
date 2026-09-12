@@ -49,9 +49,7 @@ def tmp_video_file(tmp_path: Path) -> Path:
     import cv2
 
     path = tmp_path / "clip.mp4"
-    writer = cv2.VideoWriter(
-        str(path), cv2.VideoWriter.fourcc(*"mp4v"), 10.0, (64, 64)
-    )
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter.fourcc(*"mp4v"), 10.0, (64, 64))
     if not writer.isOpened():  # pragma: no cover - codec availability
         pytest.skip("No MP4 codec available in this OpenCV build.")
     try:

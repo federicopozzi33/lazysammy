@@ -28,11 +28,20 @@ MaskMapping = Mapping[str, npt.NDArray[np.bool_]]
 
 
 class SaveFormat(str, Enum):
-    """Supported output serialization formats."""
+    """Supported output serialization formats.
+
+    Subclasses :class:`str` so members compare equal to their string value
+    (``SaveFormat.PNG == "png"``) and render as ``"png"`` rather than
+    ``"SaveFormat.PNG"`` when interpolated.
+    """
 
     PNG = "png"
     NPY = "npy"
     COCO_RLE = "coco_rle"
+
+    def __str__(self) -> str:
+        """Return the plain format string (e.g. ``"png"``)."""
+        return self.value
 
 
 def _save_mask_mapping(

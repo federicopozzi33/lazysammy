@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from enum import Enum
 from typing import Any
 
 import numpy as np
@@ -163,8 +164,22 @@ def validate_nonempty_masks(count: int, *, context: str) -> None:
 
 
 def validate_save_format(fmt: str) -> str:
-    """Validate and normalize a save format string."""
-    normalized = fmt.strip().lower()
+    """Validate and normalize a save format string.
+
+    Accepts either a plain string (``"png"``) or a string-valued enum member
+    such as :class:`~lazysammy.io.SaveFormat`.
+
+    Args:
+        fmt: The requested output format.
+
+    Returns:
+        The normalized lowercase format string.
+
+    Raises:
+        ValueError: If the format is not supported.
+    """
+    value: Any = fmt.value if isinstance(fmt, Enum) else fmt
+    normalized = str(value).strip().lower()
     if normalized not in _VALID_SAVE_FORMATS:
         msg = f"Unsupported save format: {fmt!r}. Use 'png', 'npy', or 'coco_rle'."
         raise ValueError(msg)
