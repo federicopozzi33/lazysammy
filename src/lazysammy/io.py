@@ -131,8 +131,6 @@ def save_video_results(
 
     for frame_idx, frame_masks in results:
         frame_dir = out / f"frame_{frame_idx:06d}"
-        masks_dict = {
-            f"obj_{obj_id:04d}": mask for obj_id, mask in frame_masks.masks.items()
-        }
+        masks_dict = {f"obj_{obj_id:04d}": mask for obj_id, mask in frame_masks.masks.items()}
         _save_mask_mapping(masks_dict, frame_dir, fmt=normalized)
     return out

@@ -271,9 +271,7 @@ class SAM2:
         Returns:
             Refined :class:`ImagePrediction`.
         """
-        return self.image_segmenter.refine(
-            image, previous_logits, points=points, labels=labels
-        )
+        return self.image_segmenter.refine(image, previous_logits, points=points, labels=labels)
 
     def segment_batch(
         self,
@@ -330,10 +328,7 @@ class SAM2:
             return save_image_prediction(result, output_dir, fmt=fmt)
         if isinstance(result, AutoMaskResult):
             return save_auto_mask_result(result, output_dir, fmt=fmt)
-        msg = (
-            "save() expects an ImagePrediction or AutoMaskResult; "
-            f"got {type(result).__name__}."
-        )
+        msg = f"save() expects an ImagePrediction or AutoMaskResult; got {type(result).__name__}."
         raise TypeError(msg)
 
     # ------------------------------------------------------------------

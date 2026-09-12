@@ -124,7 +124,10 @@ class VideoTracker:
         video = Path(video)
         if is_video_file(video):
             video_dir = extract_frames(
-                video, frames_dir, every_n=every_n, max_frames=max_frames,
+                video,
+                frames_dir,
+                every_n=every_n,
+                max_frames=max_frames,
             )
         else:
             video_dir = video
@@ -344,12 +347,8 @@ class VideoSession:
         Returns:
             :class:`VideoResults` merging forward and backward passes.
         """
-        forward = self.propagate(
-            start_frame=start_frame, max_frames=max_frames, reverse=False
-        )
-        backward = self.propagate(
-            start_frame=start_frame, max_frames=max_frames, reverse=True
-        )
+        forward = self.propagate(start_frame=start_frame, max_frames=max_frames, reverse=False)
+        backward = self.propagate(start_frame=start_frame, max_frames=max_frames, reverse=True)
         # Merge: forward takes priority on overlapping frames
         merged = VideoResults(video_dir=self._video_dir, num_frames=self._num_frames)
         bwd_index = {fm.frame_idx: fm for fm in backward.frames}
@@ -382,9 +381,7 @@ class VideoSession:
         """
         validate_frame_index(frame_idx, self._num_frames)
         with torch.inference_mode(), autocast(self._device):
-            self._predictor.clear_all_prompts_in_frame(
-                self._state, frame_idx, obj_id
-            )
+            self._predictor.clear_all_prompts_in_frame(self._state, frame_idx, obj_id)
 
     def reset(self) -> None:
         """Reset all prompts and tracking state for this session."""
@@ -498,13 +495,21 @@ class VideoSession:
 
         if as_frames:
             return save_video_overlay(
-                self._video_dir, res, output_path,
-                alpha=alpha, draw_contours=draw_contours,
+                self._video_dir,
+                res,
+                output_path,
+                alpha=alpha,
+                draw_contours=draw_contours,
             )
         return save_video_overlay_mp4(
-            self._video_dir, res, output_path,
-            fps=fps, alpha=alpha, draw_contours=draw_contours,
-            show_ids=show_ids, show_frame_number=show_frame_number,
+            self._video_dir,
+            res,
+            output_path,
+            fps=fps,
+            alpha=alpha,
+            draw_contours=draw_contours,
+            show_ids=show_ids,
+            show_frame_number=show_frame_number,
             codec=codec,
         )
 

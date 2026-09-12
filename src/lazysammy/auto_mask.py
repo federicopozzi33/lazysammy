@@ -34,7 +34,7 @@ class AutoSegmenter:
         auto = AutoSegmenter("large")
         result = auto.generate("photo.jpg")
         for m in result.masks:
-            print(f"area={m.area}, iou={m.predicted_iou:.2f}")
+            print(f"area={m.area}, score={m.score:.2f}")
     """
 
     def __init__(

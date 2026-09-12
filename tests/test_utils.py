@@ -1,4 +1,4 @@
-"""Tests for utility functions – no SAM2 model required."""
+"""Tests for utility functions - no SAM2 model required."""
 
 from __future__ import annotations
 

@@ -200,9 +200,7 @@ class AutoMaskResult:
     def filter_by_area(self, min_area: int = 0, max_area: int | None = None) -> AutoMaskResult:
         """Return a new result keeping only masks within the area range."""
         filtered = [
-            m
-            for m in self.masks
-            if m.area >= min_area and (max_area is None or m.area <= max_area)
+            m for m in self.masks if m.area >= min_area and (max_area is None or m.area <= max_area)
         ]
         return AutoMaskResult(masks=filtered, image_shape=self.image_shape)
 

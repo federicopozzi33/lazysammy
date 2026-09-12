@@ -1,4 +1,4 @@
-"""Tests for types module – no SAM2 model required."""
+"""Tests for types module - no SAM2 model required."""
 
 from __future__ import annotations
 
@@ -131,12 +131,10 @@ class TestVideoResults:
     """VideoResults tests."""
 
     def test_iteration(self) -> None:
-        fm = FrameMasks(
-            frame_idx=0, masks={1: np.ones((10, 10), dtype=bool)}
-        )
+        fm = FrameMasks(frame_idx=0, masks={1: np.ones((10, 10), dtype=bool)})
         vr = VideoResults(frames=[fm])
         assert len(vr) == 1
-        idx, frame_masks = next(iter(vr))
+        idx, _frame_masks = next(iter(vr))
         assert idx == 0
 
     def test_getitem(self) -> None:
@@ -166,6 +164,8 @@ class TestVideoResults:
 
     def test_object_ids(self) -> None:
         fm0 = FrameMasks(frame_idx=0, masks={1: np.ones((10, 10), dtype=bool)})
-        fm1 = FrameMasks(frame_idx=1, masks={1: np.ones((10, 10), dtype=bool), 3: np.ones((10, 10), dtype=bool)})
+        fm1 = FrameMasks(
+            frame_idx=1, masks={1: np.ones((10, 10), dtype=bool), 3: np.ones((10, 10), dtype=bool)}
+        )
         vr = VideoResults(frames=[fm0, fm1])
         assert vr.object_ids == {1, 3}

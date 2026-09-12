@@ -27,7 +27,6 @@ def validate_image_array(image: npt.NDArray[np.generic], *, name: str = "image")
         raise ValueError(msg)
 
 
-
 def validate_points_and_labels(
     points: Sequence[Sequence[float]] | npt.NDArray[np.floating[Any]] | None,
     labels: Sequence[int] | npt.NDArray[np.integer[Any]] | None,
@@ -57,7 +56,6 @@ def validate_points_and_labels(
     if not np.isin(labels_arr, [0, 1]).all():
         msg = "labels must contain only 0 (background) or 1 (foreground)."
         raise ValueError(msg)
-
 
 
 def validate_box(
@@ -100,7 +98,6 @@ def normalize_box(
     )
 
 
-
 def validate_mask_array(
     mask: npt.NDArray[np.generic] | None,
     *,
@@ -119,7 +116,6 @@ def validate_mask_array(
     raise ValueError(msg)
 
 
-
 def validate_segment_prompts(
     *,
     points: Sequence[Sequence[float]] | npt.NDArray[np.floating[Any]] | None,
@@ -136,7 +132,6 @@ def validate_segment_prompts(
         raise ValueError(msg)
 
 
-
 def validate_sequence_length(name: str, seq: Sequence[Any] | None, expected: int) -> None:
     """Validate that an optional sequence matches the expected length."""
     if seq is not None and len(seq) != expected:
@@ -144,13 +139,11 @@ def validate_sequence_length(name: str, seq: Sequence[Any] | None, expected: int
         raise ValueError(msg)
 
 
-
 def validate_frame_index(frame_idx: int, num_frames: int) -> None:
     """Validate that a frame index exists in a video."""
     if frame_idx < 0 or frame_idx >= num_frames:
         msg = f"frame_idx {frame_idx} out of range (0-{num_frames - 1})"
         raise IndexError(msg)
-
 
 
 def validate_positive_int(name: str, value: int | None, *, minimum: int = 1) -> None:
@@ -162,7 +155,6 @@ def validate_positive_int(name: str, value: int | None, *, minimum: int = 1) -> 
         raise ValueError(msg)
 
 
-
 def validate_nonempty_masks(count: int, *, context: str) -> None:
     """Validate that a result contains at least one mask."""
     if count == 0:
@@ -170,14 +162,10 @@ def validate_nonempty_masks(count: int, *, context: str) -> None:
         raise ValueError(msg)
 
 
-
 def validate_save_format(fmt: str) -> str:
     """Validate and normalize a save format string."""
     normalized = fmt.strip().lower()
     if normalized not in _VALID_SAVE_FORMATS:
-        msg = (
-            f"Unsupported save format: {fmt!r}. "
-            "Use 'png', 'npy', or 'coco_rle'."
-        )
+        msg = f"Unsupported save format: {fmt!r}. Use 'png', 'npy', or 'coco_rle'."
         raise ValueError(msg)
     return normalized

@@ -191,7 +191,10 @@ def extract_frames(
     fps = cap.get(cv2.CAP_PROP_FPS)
     logger.info(
         "Extracting frames from %s (%d frames, %.1f FPS, every_n=%d)",
-        video_path.name, total, fps, every_n,
+        video_path.name,
+        total,
+        fps,
+        every_n,
     )
 
     saved = 0
@@ -228,9 +231,7 @@ def natural_sort_key(path: Path) -> tuple[Any, ...]:
     """
     parts = re.split(r"(\d+)", path.stem)
     return tuple(
-        (1, int(part)) if part.isdigit() else (0, part.lower())
-        for part in parts
-        if part != ""
+        (1, int(part)) if part.isdigit() else (0, part.lower()) for part in parts if part != ""
     )
 
 
@@ -392,8 +393,7 @@ def masks_to_colored_overlay(
     if colors is None:
         rng = np.random.default_rng(42)
         colors = [
-            (int(c[0]), int(c[1]), int(c[2]))
-            for c in rng.integers(60, 220, size=(len(masks), 3))
+            (int(c[0]), int(c[1]), int(c[2])) for c in rng.integers(60, 220, size=(len(masks), 3))
         ]
 
     overlay: npt.NDArray[np.uint8] = image.copy()

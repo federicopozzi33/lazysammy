@@ -30,7 +30,13 @@ from lazysammy.io import (
     save_image_prediction,
     save_video_results,
 )
-from lazysammy.prompts import PromptPicker, pick_box_on_image, pick_points_on_image, preview_frame
+from lazysammy.prompts import (
+    PromptPicker,
+    is_interactive_backend,
+    pick_box_on_image,
+    pick_points_on_image,
+    preview_frame,
+)
 from lazysammy.sam2 import SAM2
 from lazysammy.types import (
     AutoMask,
@@ -88,6 +94,7 @@ __all__ = [
     "draw_masks_on_image",
     "draw_points_on_image",
     "extract_frames",
+    "is_interactive_backend",
     "masks_to_colored_overlay",
     "pick_box_on_image",
     "pick_points_on_image",

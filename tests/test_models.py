@@ -1,4 +1,4 @@
-"""Tests for the model loading module – no SAM2 model required."""
+"""Tests for the model loading module - no SAM2 model required."""
 
 from __future__ import annotations
 

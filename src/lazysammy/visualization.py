@@ -222,8 +222,10 @@ def show_auto_masks(
     img = load_image(image) if not isinstance(image, np.ndarray) else image
     masks_to_show = result.masks[:max_masks] if max_masks else result.masks
 
-    all_masks = np.stack([m.data for m in masks_to_show]) if masks_to_show else np.zeros(
-        (0, *img.shape[:2]), dtype=bool
+    all_masks = (
+        np.stack([m.data for m in masks_to_show])
+        if masks_to_show
+        else np.zeros((0, *img.shape[:2]), dtype=bool)
     )
     overlay = draw_masks_on_image(img, all_masks, alpha=alpha)
 
@@ -398,9 +400,7 @@ def save_video_overlay_mp4(
         msg = f"codec must be a 4-character FourCC string; got {codec!r}."
         raise ValueError(msg)
 
-    writer = cv2.VideoWriter(
-        str(out), cv2.VideoWriter.fourcc(*codec), fps, (w, h)
-    )
+    writer = cv2.VideoWriter(str(out), cv2.VideoWriter.fourcc(*codec), fps, (w, h))
     if not writer.isOpened():
         msg = f"Failed to open VideoWriter for {out} (codec={codec!r})"
         raise RuntimeError(msg)
@@ -415,7 +415,10 @@ def save_video_overlay_mp4(
                 colors = [_get_color(oid) for oid in oids]
                 masks_arr = np.stack([fm.masks[oid] for oid in oids])
                 frame = draw_masks_on_image(
-                    img, masks_arr, alpha=alpha, colors=colors,
+                    img,
+                    masks_arr,
+                    alpha=alpha,
+                    colors=colors,
                     draw_contours=draw_contours,
                 )
                 if show_ids:
@@ -425,18 +428,28 @@ def save_video_overlay_mp4(
                         if len(xs) > 0:
                             cx, cy = int(xs.mean()), int(ys.mean())
                             cv2.putText(
-                                frame, str(oid), (cx - 10, cy + 5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                                (255, 255, 255), 2, cv2.LINE_AA,
+                                frame,
+                                str(oid),
+                                (cx - 10, cy + 5),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.7,
+                                (255, 255, 255),
+                                2,
+                                cv2.LINE_AA,
                             )
             else:
                 frame = img.copy()
 
             if show_frame_number:
                 cv2.putText(
-                    frame, f"Frame {idx}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                    (255, 255, 255), 2, cv2.LINE_AA,
+                    frame,
+                    f"Frame {idx}",
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
                 )
 
             writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))

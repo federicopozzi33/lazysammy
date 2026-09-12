@@ -71,6 +71,36 @@ def _check_interactive_backend() -> None:
         )
 
 
+def is_interactive_backend() -> bool:
+    """Return ``True`` when the active matplotlib backend accepts clicks.
+
+    The default inline backend used by most notebooks cannot deliver mouse
+    events, so ``pick_points_on_image`` / ``pick_box_on_image`` would return
+    empty results silently.  Call this to detect that up-front.
+
+    Returns:
+        ``True`` for GUI/interactive backends, ``False`` for inline/static ones.
+
+    Example::
+
+        if not is_interactive_backend():
+            print("Enable %matplotlib widget for click prompts")
+    """
+    import matplotlib
+
+    backend = matplotlib.get_backend().lower()
+    if "inline" in backend:
+        return False
+    return backend not in {"agg", "svg", "pdf", "ps", "cairo", "template"}
+
+
+def _backend_name() -> str:
+    """Return the current matplotlib backend name (for messages)."""
+    import matplotlib
+
+    return str(matplotlib.get_backend())
+
+
 # ---------------------------------------------------------------------------
 # Standalone helpers (no session required)
 # ---------------------------------------------------------------------------
@@ -222,6 +252,14 @@ def pick_points_on_image(
     fig.tight_layout()
     fig.canvas.draw_idle()
     plt.show()
+
+    if not points and not is_interactive_backend():
+        logger.warning(
+            "No points were collected because the %r backend cannot receive "
+            "clicks. Switch to '%%matplotlib widget' (ipympl) and re-run this "
+            "cell.",
+            _backend_name(),
+        )
     return points, labels
 
 
@@ -287,8 +325,13 @@ def pick_box_on_image(
             bx1, by1 = min(x1, x2), min(y1, y2)
             bx2, by2 = max(x1, x2), max(y1, y2)
             rect = patches.Rectangle(
-                (bx1, by1), bx2 - bx1, by2 - by1,
-                linewidth=2, edgecolor=box_color, facecolor=box_color, alpha=0.15,
+                (bx1, by1),
+                bx2 - bx1,
+                by2 - by1,
+                linewidth=2,
+                edgecolor=box_color,
+                facecolor=box_color,
+                alpha=0.15,
             )
             ax.add_patch(rect)
             ax.set_title(f"Box: [{bx1:.0f}, {by1:.0f}, {bx2:.0f}, {by2:.0f}]")
@@ -309,6 +352,13 @@ def pick_box_on_image(
     plt.show()
 
     if len(corners) < 2:
+        if not is_interactive_backend():
+            logger.warning(
+                "No box was drawn because the %r backend cannot receive "
+                "clicks. Switch to '%%matplotlib widget' (ipympl) and re-run "
+                "this cell.",
+                _backend_name(),
+            )
         return []
     x1, y1 = corners[0]
     x2, y2 = corners[1]
@@ -364,7 +414,10 @@ class PromptPicker:
         """
         img = self.get_frame(frame_idx)
         return pick_points_on_image(
-            img, n=n, title=f"Frame {frame_idx} - pick points", **kwargs,
+            img,
+            n=n,
+            title=f"Frame {frame_idx} - pick points",
+            **kwargs,
         )
 
     def pick_box(
@@ -378,7 +431,9 @@ class PromptPicker:
         """
         img = self.get_frame(frame_idx)
         return pick_box_on_image(
-            img, title=f"Frame {frame_idx} - draw box", **kwargs,
+            img,
+            title=f"Frame {frame_idx} - draw box",
+            **kwargs,
         )
 
     def add_points_interactive(

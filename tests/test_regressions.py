@@ -7,6 +7,8 @@ encode the *contract*, not the implementation.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -26,23 +28,14 @@ def _touch(path: Path) -> None:
     path.write_bytes(b"x")
 
 
-class _no_warnings:
-    """Context manager that fails if any warning is emitted."""
+@contextmanager
+def _fail_on_warning() -> Iterator[None]:
+    """Fail the test if any warning is emitted inside the block."""
+    import warnings
 
-    def __init__(self) -> None:
-        self._ctx: object | None = None
-
-    def __enter__(self) -> "_no_warnings":
-        import warnings
-
-        self._ctx = warnings.catch_warnings()
-        self._ctx.__enter__()  # type: ignore[attr-defined]
+    with warnings.catch_warnings():
         warnings.simplefilter("error")
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        assert self._ctx is not None
-        self._ctx.__exit__(*args)  # type: ignore[attr-defined]
+        yield
 
 
 class TestNaturalFrameOrdering:
@@ -84,9 +77,8 @@ class TestAutocastCPU:
         assert get_autocast_dtype(torch.device("cpu")) is torch.float32
 
     def test_cpu_autocast_does_not_warn(self) -> None:
-        with _no_warnings():
-            with autocast(torch.device("cpu")):
-                _ = torch.ones(2)
+        with _fail_on_warning(), autocast(torch.device("cpu")):
+            _ = torch.ones(2)
 
     def test_cpu_autocast_is_usable(self) -> None:
         with autocast(torch.device("cpu")):
@@ -133,7 +125,7 @@ class TestMaskInputTyping:
 class TestVideoResultsAccess:
     """Regression: __getitem__ raised KeyError instead of IndexError."""
 
-    def _results(self):  # noqa: ANN202
+    def _results(self):
         from lazysammy.types import FrameMasks, VideoResults
 
         return VideoResults(

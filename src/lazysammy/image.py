@@ -326,8 +326,7 @@ class ImageSegmenter:
         if not boxes:
             return []
         normalized_boxes = [
-            normalize_box(box, name=f"boxes[{idx}]")
-            for idx, box in enumerate(boxes)
+            normalize_box(box, name=f"boxes[{idx}]") for idx, box in enumerate(boxes)
         ]
         img = load_image(image)
         results: list[ImagePrediction] = []
