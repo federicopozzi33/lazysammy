@@ -141,8 +141,18 @@ def extract_frames(
     every_n: int = 1,
     max_frames: int | None = None,
     frame_format: str = "jpg",
+    clean: bool = False,
 ) -> Path:
     """Extract frames from a video file into a directory.
+
+    Frames are written as zero-padded ``<index>.jpg`` files so they always
+    sort correctly.
+
+    Because the output directory is reused, **re-extracting into a directory
+    that already holds frames can mix results from two different settings** —
+    the new run only writes the frames it produces, leaving older ones in
+    place. Pass ``clean=True`` when re-extracting with a different ``every_n``
+    or ``max_frames``.
 
     Args:
         video_path: Path to a video file (mp4, avi, mov, …).
@@ -152,6 +162,8 @@ def extract_frames(
         every_n: Keep every *n*-th frame (1 = all frames).
         max_frames: Stop after saving this many frames (``None`` = all).
         frame_format: Image format for saved frames (``"jpg"`` or ``"png"``).
+        clean: Delete pre-existing frames in *output_dir* before extracting,
+            so the result reflects only the current settings.
 
     Returns:
         Path to the directory containing the extracted frames.
@@ -182,6 +194,13 @@ def extract_frames(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if clean:
+        stale = [f for f in output_dir.iterdir() if f.suffix.lower() in _IMAGE_EXTS]
+        for f in stale:
+            f.unlink()
+        if stale:
+            logger.info("Removed %d stale frame(s) from %s", len(stale), output_dir)
+
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         msg = f"Failed to open video: {video_path}"
@@ -211,6 +230,19 @@ def extract_frames(
                 break
         idx += 1
     cap.release()
+
+    present = [f for f in output_dir.iterdir() if f.suffix.lower() in _IMAGE_EXTS]
+    if not clean and len(present) > saved:
+        logger.warning(
+            "Extracted %d frame(s) into %s, but the directory already contained "
+            "%d image file(s) from a previous run. The frame set now mixes both "
+            "runs. Re-run with clean=True (or point output_dir at a fresh "
+            "directory) to get a consistent set.",
+            saved,
+            output_dir,
+            len(present),
+        )
+
     logger.info("Extracted %d frames to %s", saved, output_dir)
     return output_dir
 

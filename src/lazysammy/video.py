@@ -97,6 +97,7 @@ class VideoTracker:
         frames_dir: str | Path | None = None,
         every_n: int = 1,
         max_frames: int | None = None,
+        clean: bool = False,
     ) -> VideoSession:
         """Start a new tracking session on a video.
 
@@ -112,6 +113,9 @@ class VideoTracker:
             frames_dir: Where to extract frames when *video* is a file.
             every_n: Keep every *n*-th frame (video file only).
             max_frames: Max frames to extract (video file only).
+            clean: Delete pre-existing frames before extracting (video file
+                only). Use this when re-extracting with different ``every_n``
+                or ``max_frames`` so the frame set does not mix two runs.
 
         Returns:
             A :class:`VideoSession` that you can add prompts to and propagate.
@@ -126,6 +130,7 @@ class VideoTracker:
                 frames_dir,
                 every_n=every_n,
                 max_frames=max_frames,
+                clean=clean,
             )
         else:
             video_dir = video

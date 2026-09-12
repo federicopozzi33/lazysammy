@@ -420,6 +420,7 @@ class SAM2:
         frames_dir: str | Path | None = None,
         every_n: int = 1,
         max_frames: int | None = None,
+        clean: bool = False,
     ) -> VideoSession:
         """Start a video tracking session.
 
@@ -434,6 +435,8 @@ class SAM2:
             frames_dir: Where to extract frames (video file only).
             every_n: Keep every *n*-th frame (video file only).
             max_frames: Max frames to extract (video file only).
+            clean: Delete pre-existing frames before extracting (video file
+                only), so the frame set reflects only the current settings.
 
         Returns:
             A :class:`VideoSession` ready for prompt addition and propagation.
@@ -445,4 +448,5 @@ class SAM2:
             frames_dir=frames_dir,
             every_n=every_n,
             max_frames=max_frames,
+            clean=clean,
         )

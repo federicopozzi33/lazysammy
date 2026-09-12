@@ -61,14 +61,13 @@ from pathlib import Path
 import cv2
 import matplotlib
 
-# Prefer an interactive backend so click-to-prompt works. Fall back gracefully.
+# Choose a matplotlib backend. 'widget' supports click-to-prompt (ipympl, from
+# the notebook extra); 'inline' is the safe fallback. A non-widget backend is
+# not an error: the notebook detects it and skips the interactive cell.
 try:
     get_ipython().run_line_magic("matplotlib", "widget")
-except Exception:  # pragma: no cover - depends on the environment
-    try:
-        get_ipython().run_line_magic("matplotlib", "inline")
-    except Exception:
-        pass
+except Exception:
+    get_ipython().run_line_magic("matplotlib", "inline")
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -145,6 +144,7 @@ session = sam.video(
     # --- video-file options (ignored for a frame directory) ---
     every_n=1,          # keep every frame
     max_frames=MAX_FRAMES,
+    clean=True,         # clear stale frames so max_frames is actually honoured
     # frames_dir=None,  # default: <stem>_frames/
 )
 print(f"Session ready: {session.num_frames} frames from {session.video_dir}")
@@ -232,16 +232,20 @@ picker.preview(frame_idx=0)
 # Click to place points for object 2. Left = foreground, right = background.
 # Finish with Enter/q/Esc.
 #
-# On a non-interactive backend this warns and returns empty lists, so we guard
-# it here to keep the notebook runnable end-to-end in any environment.
-if is_interactive_backend():
-    points, labels = picker.add_points_interactive(frame_idx=0, obj_id=2)
-    print(f"object 2 -> {len(points)} point(s), labels={labels}")
-else:
-    print("Non-interactive backend: using manual coordinates instead.")
+# This is the one cell that needs a human at the keyboard. We fall back to
+# coordinates when clicks are unavailable OR when nothing was clicked (for
+# example when the notebook is executed non-interactively), so the rest of the
+# notebook always describes a real, populated session.
+points, labels = (
+    picker.add_points_interactive(frame_idx=0, obj_id=2)
+    if is_interactive_backend()
+    else ([], [])
+)
+if not points:
+    print("No clicks received (non-interactive run) — using coordinates instead.")
     points, labels = [[450, 300]], [1]
     session.add_points(frame_idx=0, obj_id=2, points=points, labels=labels)
-    print(f"object 2 -> {len(points)} point(s), labels={labels}")
+print(f"object 2 -> {len(points)} point(s), labels={labels}")
 """
     ),
     md(
@@ -548,6 +552,7 @@ tracker = VideoTracker(
 session2 = tracker.new_session(
     VIDEO_PATH,
     max_frames=MAX_FRAMES,        # same cap as the main session
+    clean=True,                   # ignore frames left by the earlier cells
     offload_video_to_cpu=True,    # lower GPU memory usage
     offload_state_to_cpu=False,
 )

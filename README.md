@@ -391,9 +391,15 @@ session = sam.video(
     every_n=2,                  # keep every 2nd frame
     max_frames=200,             # stop after 200
     frames_dir="my_frames/",    # where to extract (default: <stem>_frames/)
+    clean=True,                 # clear stale frames when re-extracting
     offload_video_to_cpu=True,  # lower GPU memory
 )
 ```
+
+> Extracted frames are reused across runs, so re-extracting with a different
+> `every_n` or `max_frames` into the same directory would otherwise mix the two
+> runs. Pass `clean=True` to start from a clean directory — the library also
+> warns if it detects this situation.
 
 ### Memory tips
 
