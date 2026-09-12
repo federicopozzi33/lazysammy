@@ -14,6 +14,7 @@ from lazysammy.io import save_auto_mask_result
 from lazysammy.types import AutoMask, AutoMaskResult, ModelSize
 from lazysammy.utils import (
     auto_detect_device,
+    autocast,
     get_autocast_dtype,
     load_image,
 )
@@ -96,7 +97,7 @@ class AutoSegmenter:
         """
         img = load_image(image)
 
-        with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
+        with torch.inference_mode(), autocast(self._device):
             raw_anns = self._generator.generate(img)
 
         masks = [

@@ -24,20 +24,29 @@ from __future__ import annotations
 
 from lazysammy.auto_mask import AutoSegmenter
 from lazysammy.image import ImageSegmenter
-from lazysammy.io import SaveFormat, save_auto_mask_result, save_image_prediction, save_video_results
+from lazysammy.io import (
+    SaveFormat,
+    save_auto_mask_result,
+    save_image_prediction,
+    save_video_results,
+)
 from lazysammy.prompts import PromptPicker, pick_box_on_image, pick_points_on_image, preview_frame
 from lazysammy.sam2 import SAM2
 from lazysammy.types import (
     AutoMask,
     AutoMaskResult,
+    BoundingBox,
     FrameMasks,
     ImagePrediction,
     Mask,
     ModelSize,
+    PointCoords,
+    PointLabels,
     VideoResults,
 )
 from lazysammy.utils import (
     extract_frames,
+    masks_to_colored_overlay,
     save_masks_as_coco_rle,
     save_masks_as_npy,
     save_masks_as_png,
@@ -54,35 +63,42 @@ from lazysammy.visualization import (
     show_video_frame,
 )
 
+__version__ = "0.1.0"
+
 __all__ = [
     "SAM2",
     "AutoMask",
     "AutoMaskResult",
     "AutoSegmenter",
+    "BoundingBox",
     "FrameMasks",
     "ImagePrediction",
     "ImageSegmenter",
     "Mask",
     "ModelSize",
+    "PointCoords",
+    "PointLabels",
     "PromptPicker",
+    "SaveFormat",
     "VideoResults",
     "VideoSession",
     "VideoTracker",
+    "__version__",
     "draw_box_on_image",
     "draw_masks_on_image",
     "draw_points_on_image",
     "extract_frames",
+    "masks_to_colored_overlay",
     "pick_box_on_image",
     "pick_points_on_image",
     "preview_frame",
-    "save_video_overlay",
-    "save_video_overlay_mp4",
-    "SaveFormat",
     "save_auto_mask_result",
     "save_image_prediction",
     "save_masks_as_coco_rle",
     "save_masks_as_npy",
     "save_masks_as_png",
+    "save_video_overlay",
+    "save_video_overlay_mp4",
     "save_video_results",
     "show_auto_masks",
     "show_image_prediction",

@@ -43,6 +43,11 @@ def _get_color(idx: int) -> tuple[int, int, int]:
     return _DEFAULT_PALETTE[idx % len(_DEFAULT_PALETTE)]
 
 
+def _get_color_list(n: int) -> list[tuple[int, int, int]]:
+    """Return *n* deterministic palette colours."""
+    return [_get_color(i) for i in range(n)]
+
+
 # ---------------------------------------------------------------------------
 # Image-level visualisation (pure OpenCV, no matplotlib)
 # ---------------------------------------------------------------------------
@@ -71,8 +76,7 @@ def draw_masks_on_image(
         ``(H, W, 3)`` RGB image with overlaid masks.
     """
     img = load_image(image) if not isinstance(image, np.ndarray) else image.copy()
-    if colors is None:
-        colors = [_get_color(i) for i in range(len(masks))]
+    colors = _get_color_list(len(masks)) if colors is None else list(colors)
 
     overlay = masks_to_colored_overlay(img, masks, alpha=alpha, colors=colors)
 
@@ -108,11 +112,12 @@ def draw_points_on_image(
     Returns:
         Image with drawn points.
     """
-    out = image.copy()
+    out: npt.NDArray[np.uint8] = image.copy()
     for pt, lab in zip(points, labels, strict=False):
         color = fg_color if int(lab) == 1 else bg_color
-        cv2.circle(out, (int(pt[0]), int(pt[1])), radius, color, -1)
-        cv2.circle(out, (int(pt[0]), int(pt[1])), radius, (255, 255, 255), 1)
+        center = (int(pt[0]), int(pt[1]))
+        cv2.circle(out, center, radius, color, -1)
+        cv2.circle(out, center, radius, (255, 255, 255), 1)
     return out
 
 
@@ -134,8 +139,8 @@ def draw_box_on_image(
     Returns:
         Image with drawn box.
     """
-    out = image.copy()
-    x1, y1, x2, y2 = [int(v) for v in box]
+    out: npt.NDArray[np.uint8] = image.copy()
+    x1, y1, x2, y2 = (int(v) for v in box)
     cv2.rectangle(out, (x1, y1), (x2, y2), color, thickness)
     return out
 
@@ -389,8 +394,13 @@ def save_video_overlay_mp4(
     sample = load_image(frame_files[0])
     h, w = sample.shape[:2]
 
-    fourcc = cv2.VideoWriter_fourcc(*codec)
-    writer = cv2.VideoWriter(str(out), fourcc, fps, (w, h))
+    if len(codec) != 4:
+        msg = f"codec must be a 4-character FourCC string; got {codec!r}."
+        raise ValueError(msg)
+
+    writer = cv2.VideoWriter(
+        str(out), cv2.VideoWriter.fourcc(*codec), fps, (w, h)
+    )
     if not writer.isOpened():
         msg = f"Failed to open VideoWriter for {out} (codec={codec!r})"
         raise RuntimeError(msg)

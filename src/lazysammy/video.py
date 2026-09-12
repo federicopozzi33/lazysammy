@@ -22,6 +22,7 @@ from lazysammy.types import (
 )
 from lazysammy.utils import (
     auto_detect_device,
+    autocast,
     extract_frames,
     get_autocast_dtype,
     is_video_file,
@@ -130,7 +131,7 @@ class VideoTracker:
         frame_files = list_frame_files(video_dir)
         logger.info("Initialising session with %d frames from %s", len(frame_files), video_dir)
 
-        with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
+        with torch.inference_mode(), autocast(self._device):
             state = self._predictor.init_state(
                 video_path=str(video_dir),
                 offload_video_to_cpu=offload_video_to_cpu,
@@ -213,7 +214,7 @@ class VideoSession:
         pts = np.array(points, dtype=np.float32)
         lbs = np.array(labels, dtype=np.int32)
 
-        with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
+        with torch.inference_mode(), autocast(self._device):
             fidx, obj_ids, masks = self._predictor.add_new_points_or_box(
                 inference_state=self._state,
                 frame_idx=frame_idx,
@@ -244,7 +245,7 @@ class VideoSession:
         validate_box(box)
         bx = normalize_box(box)
 
-        with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
+        with torch.inference_mode(), autocast(self._device):
             fidx, obj_ids, masks = self._predictor.add_new_points_or_box(
                 inference_state=self._state,
                 frame_idx=frame_idx,
@@ -271,7 +272,7 @@ class VideoSession:
         """
         validate_frame_index(frame_idx, self._num_frames)
         validate_mask_array(mask, allow_3d=False)
-        with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
+        with torch.inference_mode(), autocast(self._device):
             fidx, obj_ids, masks = self._predictor.add_new_mask(
                 inference_state=self._state,
                 frame_idx=frame_idx,
@@ -307,7 +308,7 @@ class VideoSession:
 
         results = VideoResults(video_dir=self._video_dir, num_frames=self._num_frames)
 
-        with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
+        with torch.inference_mode(), autocast(self._device):
             for fidx, obj_ids, masks in self._predictor.propagate_in_video(
                 inference_state=self._state,
                 start_frame_idx=start_frame,
@@ -368,7 +369,7 @@ class VideoSession:
         Args:
             obj_id: The object to remove.
         """
-        with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
+        with torch.inference_mode(), autocast(self._device):
             self._predictor.remove_object(self._state, obj_id)
         logger.info("Removed object %d from session", obj_id)
 
@@ -380,14 +381,14 @@ class VideoSession:
             obj_id: The object whose prompts to clear.
         """
         validate_frame_index(frame_idx, self._num_frames)
-        with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
+        with torch.inference_mode(), autocast(self._device):
             self._predictor.clear_all_prompts_in_frame(
                 self._state, frame_idx, obj_id
             )
 
     def reset(self) -> None:
         """Reset all prompts and tracking state for this session."""
-        with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
+        with torch.inference_mode(), autocast(self._device):
             self._predictor.reset_state(self._state)
         self._results = None
         logger.info("Session reset")

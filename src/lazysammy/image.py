@@ -16,13 +16,14 @@ from lazysammy.types import (
     BoundingBox,
     ImagePrediction,
     Mask,
-    MaskInput,
+    MaskLogits,
     ModelSize,
     PointCoords,
     PointLabels,
 )
 from lazysammy.utils import (
     auto_detect_device,
+    autocast,
     get_autocast_dtype,
     load_image,
 )
@@ -76,6 +77,20 @@ class ImageSegmenter:
         self._dtype = get_autocast_dtype(self._device)
 
     # ------------------------------------------------------------------
+    # Configuration accessors
+    # ------------------------------------------------------------------
+
+    @property
+    def device(self) -> torch.device:
+        """Device used by this segmenter."""
+        return self._device
+
+    @property
+    def predictor(self) -> Any:
+        """Access the underlying ``SAM2ImagePredictor``."""
+        return self._predictor
+
+    # ------------------------------------------------------------------
     # Core prediction
     # ------------------------------------------------------------------
 
@@ -105,7 +120,7 @@ class ImageSegmenter:
         points: PointCoords | None = None,
         labels: PointLabels | None = None,
         box: BoundingBox | None = None,
-        mask_input: MaskInput | None = None,
+        mask_input: MaskLogits | None = None,
         multimask_output: bool = True,
         return_logits: bool = False,
     ) -> ImagePrediction:
@@ -116,7 +131,8 @@ class ImageSegmenter:
             points: ``(N, 2)`` array of ``(x, y)`` point prompts.
             labels: Length-N label array (``1`` = foreground, ``0`` = background).
             box: ``[x1, y1, x2, y2]`` bounding box prompt.
-            mask_input: Low-resolution mask from a previous prediction.
+            mask_input: Low-resolution mask **logits** (e.g. ``1 x 256 x 256``)
+                from a previous prediction, as returned in :attr:`Mask.logits`.
             multimask_output: Return 3 masks for ambiguous prompts.
             return_logits: Keep raw logits instead of thresholding.
 
@@ -132,7 +148,7 @@ class ImageSegmenter:
 
         img = load_image(image)
 
-        with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
+        with torch.inference_mode(), autocast(self._device):
             self._predictor.set_image(img)
             pt = np.array(points, dtype=np.float32) if points is not None else None
             lb = np.array(labels, dtype=np.int32) if labels is not None else None
@@ -202,7 +218,7 @@ class ImageSegmenter:
 
         imgs = [load_image(im) for im in images]
 
-        with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
+        with torch.inference_mode(), autocast(self._device):
             self._predictor.set_image_batch(imgs)
             all_masks, all_scores, all_logits = self._predictor.predict_batch(
                 point_coords_batch=[
@@ -316,7 +332,7 @@ class ImageSegmenter:
         img = load_image(image)
         results: list[ImagePrediction] = []
 
-        with torch.inference_mode(), torch.autocast(self._device.type, dtype=self._dtype):
+        with torch.inference_mode(), autocast(self._device):
             self._predictor.set_image(img)
             for bx in normalized_boxes:
                 masks_np, scores_np, logits_np = self._predictor.predict(
@@ -398,13 +414,3 @@ class ImageSegmenter:
             Path to the output.
         """
         return save_image_prediction(prediction, output_dir, fmt=fmt)
-
-    @property
-    def device(self) -> torch.device:
-        """The device used by this segmenter."""
-        return self._device
-
-    @property
-    def predictor(self) -> Any:
-        """Access the underlying ``SAM2ImagePredictor``."""
-        return self._predictor

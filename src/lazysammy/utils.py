@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +15,6 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from lazysammy.types import AutoMaskResult, ImagePrediction, VideoResults
 from lazysammy.validation import validate_image_array
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,11 @@ def auto_detect_device(preferred: str | None = None) -> str:
 def get_autocast_dtype(device: torch.device) -> torch.dtype:
     """Return the recommended autocast dtype for *device*.
 
+    Autocast is only meaningful for a small set of float dtypes.  On CPU,
+    ``torch.autocast`` only supports ``bfloat16`` and ``float16``; using
+    ``float32`` emits a warning and silently disables autocast.  Callers should
+    prefer :func:`autocast` which handles the CPU/none case for them.
+
     Args:
         device: Target device.
 
@@ -58,6 +64,27 @@ def get_autocast_dtype(device: torch.device) -> torch.dtype:
     if device.type == "mps":
         return torch.float16
     return torch.float32
+
+
+def autocast(device: torch.device) -> Any:
+    """Return an autocast context manager appropriate for *device*.
+
+    Unlike a bare ``torch.autocast(device.type, dtype=...)`` call, this returns
+    a no-op ``nullcontext`` when autocast would be unsupported (CPU/float32),
+    avoiding the "target dtype is not supported. Disabling autocast." warning
+    that PyTorch otherwise emits on every call.
+
+    Args:
+        device: Target device.
+
+    Returns:
+        A context manager usable with ``with``.
+    """
+    dtype = get_autocast_dtype(device)
+    if dtype is torch.float32:
+        # CPU autocast does not support float32; run without autocast.
+        return nullcontext()
+    return torch.autocast(device.type, dtype=dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -80,11 +107,12 @@ def load_image(source: str | Path | npt.NDArray[np.uint8]) -> npt.NDArray[np.uin
     """
     if isinstance(source, np.ndarray):
         validate_image_array(source)
-        if source.ndim == 2:
-            return cv2.cvtColor(source, cv2.COLOR_GRAY2RGB)
-        if source.shape[2] == 4:
-            return cv2.cvtColor(source, cv2.COLOR_RGBA2RGB)
-        return source
+        arr = np.asarray(source)
+        if arr.ndim == 2:
+            return np.ascontiguousarray(cv2.cvtColor(arr, cv2.COLOR_GRAY2RGB), dtype=np.uint8)
+        if arr.shape[2] == 4:
+            return np.ascontiguousarray(cv2.cvtColor(arr, cv2.COLOR_RGBA2RGB), dtype=np.uint8)
+        return np.ascontiguousarray(arr, dtype=np.uint8)
 
     path = Path(source)
     if not path.exists():
@@ -94,7 +122,7 @@ def load_image(source: str | Path | npt.NDArray[np.uint8]) -> npt.NDArray[np.uin
     if img is None:
         msg = f"Failed to read image: {path}"
         raise ValueError(msg)
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return np.ascontiguousarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), dtype=np.uint8)
 
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
@@ -131,7 +159,19 @@ def extract_frames(
     Raises:
         FileNotFoundError: If the video file does not exist.
         RuntimeError: If OpenCV cannot open the video.
+        ValueError: If *every_n* or *max_frames* is not positive.
+
+    Example::
+
+        frames_dir = extract_frames("clip.mp4", every_n=2, max_frames=100)
     """
+    if every_n < 1:
+        msg = f"every_n must be >= 1; got {every_n}."
+        raise ValueError(msg)
+    if max_frames is not None and max_frames < 1:
+        msg = f"max_frames must be >= 1 when provided; got {max_frames}."
+        raise ValueError(msg)
+
     video_path = Path(video_path)
     if not video_path.is_file():
         msg = f"Video file not found: {video_path}"
@@ -172,8 +212,33 @@ def extract_frames(
     return output_dir
 
 
+def natural_sort_key(path: Path) -> tuple[Any, ...]:
+    """Build a sort key that orders numeric filenames naturally.
+
+    Plain lexicographic sorting puts ``"10.jpg"`` before ``"2.jpg"``, which
+    silently scrambles the frame order of videos whose frames are not
+    zero-padded.  This key splits the filename stem into digit and
+    non-digit runs so ``2`` sorts before ``10``.
+
+    Args:
+        path: Frame path whose ``stem`` is used for ordering.
+
+    Returns:
+        A tuple suitable as a ``sorted(key=...)`` argument.
+    """
+    parts = re.split(r"(\d+)", path.stem)
+    return tuple(
+        (1, int(part)) if part.isdigit() else (0, part.lower())
+        for part in parts
+        if part != ""
+    )
+
+
 def list_frame_files(video_dir: str | Path) -> list[Path]:
-    """List JPEG/PNG frame files in a directory, sorted numerically.
+    """List JPEG/PNG frame files in a directory, sorted naturally.
+
+    Frames are ordered by numeric value embedded in their name, so
+    ``2.jpg`` comes before ``10.jpg`` even when zero-padding is absent.
 
     Args:
         video_dir: Directory containing video frames.
@@ -191,7 +256,7 @@ def list_frame_files(video_dir: str | Path) -> list[Path]:
         raise FileNotFoundError(msg)
     frames = sorted(
         [f for f in video_dir.iterdir() if f.suffix.lower() in _IMAGE_EXTS],
-        key=lambda p: p.stem,
+        key=natural_sort_key,
     )
     if not frames:
         msg = f"No image files found in {video_dir}"
@@ -302,93 +367,6 @@ def save_masks_as_coco_rle(
 
 
 # ---------------------------------------------------------------------------
-# Video results saving
-# ---------------------------------------------------------------------------
-
-
-def save_video_results(
-    results: VideoResults,
-    output_dir: str | Path,
-    *,
-    fmt: str = "png",
-) -> Path:
-    """Save full video tracking results to disk.
-
-    Directory structure::
-
-        output_dir/
-            frame_000000/
-                obj_0001.png
-                obj_0002.png
-            frame_000001/
-                ...
-
-    Args:
-        results: The :class:`VideoResults` to save.
-        output_dir: Root output directory.
-        fmt: ``"png"``, ``"npy"``, or ``"coco_rle"``.
-
-    Returns:
-        Path to the root output directory.
-    """
-    from lazysammy.io import save_video_results as _save_video_results
-
-    out = _save_video_results(results, output_dir, fmt=fmt)
-    logger.info("Saved %d frames to %s (format=%s)", len(results), out, fmt)
-    return out
-
-
-def save_image_prediction(
-    prediction: ImagePrediction,
-    output_dir: str | Path,
-    *,
-    fmt: str = "png",
-    prefix: str = "mask",
-) -> Path:
-    """Save an image prediction to disk.
-
-    Args:
-        prediction: The :class:`ImagePrediction` to save.
-        output_dir: Target directory.
-        fmt: ``"png"``, ``"npy"``, or ``"coco_rle"``.
-        prefix: Filename prefix for PNG output.
-
-    Returns:
-        Path to the output directory (or npy/json file).
-    """
-    del prefix
-    from lazysammy.io import save_image_prediction as _save_image_prediction
-
-    return _save_image_prediction(prediction, output_dir, fmt=fmt)
-
-
-# ---------------------------------------------------------------------------
-# Auto mask results saving
-# ---------------------------------------------------------------------------
-
-
-def save_auto_mask_result(
-    result: AutoMaskResult,
-    output_dir: str | Path,
-    *,
-    fmt: str = "png",
-) -> Path:
-    """Save automatic mask generation result to disk.
-
-    Args:
-        result: The :class:`AutoMaskResult` to save.
-        output_dir: Target directory.
-        fmt: ``"png"``, ``"npy"``, or ``"coco_rle"``.
-
-    Returns:
-        Path to the output.
-    """
-    from lazysammy.io import save_auto_mask_result as _save_auto_mask_result
-
-    return _save_auto_mask_result(result, output_dir, fmt=fmt)
-
-
-# ---------------------------------------------------------------------------
 # Mask manipulation helpers
 # ---------------------------------------------------------------------------
 
@@ -413,14 +391,18 @@ def masks_to_colored_overlay(
     """
     if colors is None:
         rng = np.random.default_rng(42)
-        colors = [tuple(int(c) for c in rng.integers(60, 220, size=3)) for _ in range(len(masks))]
+        colors = [
+            (int(c[0]), int(c[1]), int(c[2]))
+            for c in rng.integers(60, 220, size=(len(masks), 3))
+        ]
 
-    overlay = image.copy()
+    overlay: npt.NDArray[np.uint8] = image.copy()
     for mask, color in zip(masks, colors, strict=False):
-        overlay[mask] = (
+        blended = (
             np.array(color, dtype=np.float32) * alpha
             + overlay[mask].astype(np.float32) * (1 - alpha)
         ).astype(np.uint8)
+        overlay[mask] = blended
     return overlay
 
 
@@ -433,7 +415,8 @@ def combine_masks(masks: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]:
     Returns:
         ``(H, W)`` boolean mask.
     """
-    return np.any(masks, axis=0)
+    combined: npt.NDArray[np.bool_] = np.any(masks, axis=0)
+    return combined
 
 
 def mask_to_bbox(mask: npt.NDArray[np.bool_]) -> list[int]:

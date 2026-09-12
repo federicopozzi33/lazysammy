@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -58,14 +58,6 @@ CONFIG_FILENAMES: dict[ModelSize, str] = {
     ModelSize.LARGE: "configs/sam2.1/sam2.1_hiera_l.yaml",
 }
 
-# Checkpoint download URLs
-CHECKPOINT_URLS: dict[ModelSize, str] = {
-    ModelSize.TINY: "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt",
-    ModelSize.SMALL: "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt",
-    ModelSize.BASE_PLUS: "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt",
-    ModelSize.LARGE: "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt",
-}
-
 
 # ---- Convenience type aliases ----
 PointCoords = Sequence[Sequence[float]] | npt.NDArray[np.floating[Any]]
@@ -74,7 +66,11 @@ BoundingBox = (
     Sequence[float]  # [x1, y1, x2, y2]
     | npt.NDArray[np.floating[Any]]
 )
-MaskInput = npt.NDArray[np.uint8]  # H x W binary mask
+# Low-resolution mask logits (e.g. ``1 x 256 x 256``) as returned in
+# :attr:`Mask.logits` and accepted by ``mask_input`` for iterative refinement.
+MaskLogits = npt.NDArray[np.floating[Any]]
+# Binary ``(H, W)`` mask used as a prompt (``True``/``1`` = foreground).
+MaskInput = npt.NDArray[np.bool_] | npt.NDArray[np.uint8]
 ImageInput = npt.NDArray[np.uint8]  # H x W x 3 RGB array
 
 
@@ -112,11 +108,16 @@ class Mask:
         return self.data.astype(np.uint8) * 255
 
     def save(self, path: str | Path) -> None:
-        """Save the mask as a PNG file."""
+        """Save the mask as a PNG file.
+
+        Args:
+            path: Destination ``.png`` path. Parent directories are created.
+        """
         import cv2
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(path), self.as_uint8())
+
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(p), self.as_uint8())
 
 
 @dataclass
@@ -254,8 +255,14 @@ class VideoResults:
 
     # -- iteration helpers --------------------------------------------------
 
-    def __iter__(self):  # noqa: ANN204
-        """Iterate over ``(frame_idx, FrameMasks)`` pairs sorted by frame index."""
+    def __iter__(self) -> Iterator[tuple[int, FrameMasks]]:
+        """Iterate over ``(frame_idx, FrameMasks)`` pairs sorted by frame index.
+
+        Example::
+
+            for frame_idx, frame in results:
+                print(frame_idx, frame.object_ids)
+        """
         for fm in sorted(self.frames, key=lambda f: f.frame_idx):
             yield fm.frame_idx, fm
 
@@ -263,7 +270,20 @@ class VideoResults:
         return len(self.frames)
 
     def __getitem__(self, frame_idx: int) -> FrameMasks:
-        return self._frame_index()[frame_idx]
+        """Return :class:`FrameMasks` for *frame_idx*.
+
+        Raises:
+            IndexError: If the frame was not tracked.
+        """
+        index = self._frame_index()
+        if frame_idx not in index:
+            msg = f"Frame {frame_idx} is not present in these results."
+            raise IndexError(msg)
+        return index[frame_idx]
+
+    def values(self) -> list[FrameMasks]:
+        """Return :class:`FrameMasks` objects sorted by frame index."""
+        return sorted(self.frames, key=lambda f: f.frame_idx)
 
     def get_frame_masks(self, frame_idx: int) -> FrameMasks | None:
         """Return masks for a frame, or ``None`` if absent."""
