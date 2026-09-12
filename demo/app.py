@@ -405,7 +405,7 @@ def _format_prompts_html(prompts: list[dict]) -> str:
             b = p["box"]
             rows.append(
                 f"{badge}Obj {p['obj_id']} | Frame {p['frame_idx']} | "
-                f"box ({b[0]:.0f},{b[1]:.0f})->({b[2]:.0f},{b[3]:.0f})"
+                f"box ({b[0]:.0f},{b[1]:.0f}) to ({b[2]:.0f},{b[3]:.0f})"
             )
 
     body = "<br>".join(rows)
@@ -659,7 +659,8 @@ def build_app() -> gr.Blocks:
                     )
                 if len(box) >= 2:
                     parts.append(
-                        f"box: ({box[0][0]:.0f},{box[0][1]:.0f})->({box[1][0]:.0f},{box[1][1]:.0f})"
+                        f"box: ({box[0][0]:.0f},{box[0][1]:.0f})"
+                        f" to ({box[1][0]:.0f},{box[1][1]:.0f})"
                     )
                 return " | ".join(parts) if parts else ""
 
@@ -837,8 +838,8 @@ def build_app() -> gr.Blocks:
 
         with gr.Tab("Video Tracking"):
             gr.Markdown(
-                "> Upload a video -> click on frames to mark objects -> "
-                "run tracking to get an overlay video.  \n"
+                "1. Upload a video. 2. Click on frames to mark objects. "
+                "3. Run tracking to get an overlay video.  \n"
                 "> **Tip:** Enable *Bidirectional* if your prompts are on "
                 "a mid-video frame so tracking runs both forward *and* backward."
             )
