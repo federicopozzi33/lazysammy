@@ -24,7 +24,6 @@ from lazysammy.types import (
 from lazysammy.utils import (
     auto_detect_device,
     autocast,
-    get_autocast_dtype,
     load_image,
 )
 from lazysammy.validation import (
@@ -74,7 +73,6 @@ class ImageSegmenter:
             model_size, checkpoint=checkpoint, device=device, **kwargs
         )
         self._device = torch.device(auto_detect_device(device))
-        self._dtype = get_autocast_dtype(self._device)
 
     # ------------------------------------------------------------------
     # Configuration accessors

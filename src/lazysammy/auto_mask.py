@@ -15,7 +15,6 @@ from lazysammy.types import AutoMask, AutoMaskResult, ModelSize
 from lazysammy.utils import (
     auto_detect_device,
     autocast,
-    get_autocast_dtype,
     load_image,
 )
 
@@ -77,7 +76,6 @@ class AutoSegmenter:
             **kwargs,
         )
         self._device = torch.device(auto_detect_device(device))
-        self._dtype = get_autocast_dtype(self._device)
 
     # ------------------------------------------------------------------
     # Core generation

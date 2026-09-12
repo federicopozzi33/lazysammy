@@ -102,7 +102,6 @@ def _make_session(num_frames: int = 3) -> tuple[VideoSession, _StubVideoPredicto
         num_frames=num_frames,
         frame_files=[Path(f"/tmp/frames/{i:05d}.jpg") for i in range(num_frames)],
         device=torch.device("cpu"),
-        dtype=torch.float32,
     )
     return session, predictor
 
@@ -258,14 +257,17 @@ class TestProperties:
         assert session.num_frames == 7
         assert session.video_dir == Path("/tmp/frames")
 
+    def test_device_property(self) -> None:
+        session, _ = _make_session()
+        assert session.device == torch.device("cpu")
+
     def test_results_is_none_before_propagation(self) -> None:
         session, _ = _make_session()
         assert session.results is None
 
 
 class TestVideoTrackerDevice:
-    def test_autocast_dtype_for_cpu(self) -> None:
+    def test_device_property(self) -> None:
         tracker = VideoTracker.__new__(VideoTracker)
         tracker._device = torch.device("cpu")
-        tracker._dtype = torch.float32
         assert tracker.device == torch.device("cpu")

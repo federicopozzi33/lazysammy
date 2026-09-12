@@ -24,7 +24,6 @@ from lazysammy.utils import (
     auto_detect_device,
     autocast,
     extract_frames,
-    get_autocast_dtype,
     is_video_file,
     list_frame_files,
 )
@@ -88,7 +87,6 @@ class VideoTracker:
             **kwargs,
         )
         self._device = torch.device(auto_detect_device(device))
-        self._dtype = get_autocast_dtype(self._device)
 
     def new_session(
         self,
@@ -147,7 +145,6 @@ class VideoTracker:
             num_frames=len(frame_files),
             frame_files=frame_files,
             device=self._device,
-            dtype=self._dtype,
         )
 
     @property
@@ -176,7 +173,6 @@ class VideoSession:
         num_frames: int,
         frame_files: list[Path],
         device: torch.device,
-        dtype: torch.dtype,
     ) -> None:
         self._predictor = predictor
         self._state = inference_state
@@ -184,7 +180,6 @@ class VideoSession:
         self._num_frames = num_frames
         self._frame_files = frame_files
         self._device = device
-        self._dtype = dtype
         self._results: VideoResults | None = None
 
     # ------------------------------------------------------------------
@@ -403,6 +398,11 @@ class VideoSession:
     def num_frames(self) -> int:
         """Total number of frames in the video."""
         return self._num_frames
+
+    @property
+    def device(self) -> torch.device:
+        """Device used by this session."""
+        return self._device
 
     @property
     def video_dir(self) -> Path:

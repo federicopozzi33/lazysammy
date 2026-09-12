@@ -71,9 +71,7 @@ def _rectangle_reference(shape: tuple[int, int] = (128, 128)) -> np.ndarray:
 
 
 class TestImageSegmentationEndToEnd:
-    def test_point_prompt_segments_the_rectangle(
-        self, sam: SAM2, square_image: np.ndarray
-    ) -> None:
+    def test_point_prompt_segments_the_rectangle(self, sam: SAM2, square_image: np.ndarray) -> None:
         pred = sam.segment_point(square_image, x=60, y=65)
 
         assert len(pred) >= 1
@@ -82,18 +80,14 @@ class TestImageSegmentationEndToEnd:
         # The model should recover the rectangle almost exactly.
         assert _iou(best.data, _rectangle_reference()) > 0.9
 
-    def test_box_prompt_matches_rectangle(
-        self, sam: SAM2, square_image: np.ndarray
-    ) -> None:
+    def test_box_prompt_matches_rectangle(self, sam: SAM2, square_image: np.ndarray) -> None:
         pred = sam.segment_box(square_image, 40, 40, 80, 90)
         assert pred.best_mask.area == pytest.approx(2000, rel=0.05)
 
     def test_multi_box_returns_one_prediction_per_box(
         self, sam: SAM2, square_image: np.ndarray
     ) -> None:
-        preds = sam.segment_multi_box(
-            square_image, [[40, 40, 80, 90], [0, 0, 20, 20]]
-        )
+        preds = sam.segment_multi_box(square_image, [[40, 40, 80, 90], [0, 0, 20, 20]])
         assert len(preds) == 2
         assert preds[0].best_mask.area > preds[1].best_mask.area
 
@@ -101,9 +95,7 @@ class TestImageSegmentationEndToEnd:
         with pytest.raises(ValueError, match="At least one prompt"):
             sam.segment(square_image)
 
-    def test_accepts_file_path(
-        self, sam: SAM2, tmp_path: Path, square_image: np.ndarray
-    ) -> None:
+    def test_accepts_file_path(self, sam: SAM2, tmp_path: Path, square_image: np.ndarray) -> None:
         path = tmp_path / "img.png"
         cv2.imwrite(str(path), cv2.cvtColor(square_image, cv2.COLOR_RGB2BGR))
 
@@ -111,9 +103,7 @@ class TestImageSegmentationEndToEnd:
         assert pred.best_mask.area == pytest.approx(2000, rel=0.1)
         assert pred.image_shape == (128, 128)
 
-    def test_mask_save_roundtrip(
-        self, sam: SAM2, square_image: np.ndarray, tmp_path: Path
-    ) -> None:
+    def test_mask_save_roundtrip(self, sam: SAM2, square_image: np.ndarray, tmp_path: Path) -> None:
         pred = sam.segment_point(square_image, x=60, y=65)
         out = tmp_path / "mask.png"
         pred.best_mask.save(out)
@@ -124,9 +114,7 @@ class TestImageSegmentationEndToEnd:
 
 
 class TestRefinementEndToEnd:
-    def test_refine_with_logits_preserves_region(
-        self, sam: SAM2, square_image: np.ndarray
-    ) -> None:
+    def test_refine_with_logits_preserves_region(self, sam: SAM2, square_image: np.ndarray) -> None:
         first = sam.segment(square_image, points=[[60, 65]], labels=[1])
         logits = first.best_mask.logits
         assert logits is not None
@@ -135,9 +123,7 @@ class TestRefinementEndToEnd:
         refined = sam.refine(square_image, logits, points=[[62, 66]], labels=[1])
         assert refined.best_mask.area == pytest.approx(2000, rel=0.1)
 
-    def test_background_point_excludes_a_region(
-        self, sam: SAM2, square_image: np.ndarray
-    ) -> None:
+    def test_background_point_excludes_a_region(self, sam: SAM2, square_image: np.ndarray) -> None:
         """A label-0 click on a second blob must exclude that blob."""
         img = np.zeros((128, 128, 3), dtype=np.uint8)
         img[20:60, 20:60] = (230, 60, 60)  # blob A
@@ -157,27 +143,21 @@ class TestRefinementEndToEnd:
 
 
 class TestAutoSegmentEndToEnd:
-    def test_generates_at_least_one_mask(
-        self, sam: SAM2, square_image: np.ndarray
-    ) -> None:
+    def test_generates_at_least_one_mask(self, sam: SAM2, square_image: np.ndarray) -> None:
         result = sam.auto_segment(square_image, points_per_side=8)
 
         assert len(result) >= 1
         assert result.image_shape == (128, 128)
         assert all(m.data.dtype == bool for m in result)
 
-    def test_filters_narrow_the_result(
-        self, sam: SAM2, square_image: np.ndarray
-    ) -> None:
+    def test_filters_narrow_the_result(self, sam: SAM2, square_image: np.ndarray) -> None:
         result = sam.auto_segment(square_image, points_per_side=8)
         filtered = result.filter_by_iou(min_iou=0.99)
         assert len(filtered) <= len(result)
 
 
 class TestVideoTrackingEndToEnd:
-    def test_tracks_translating_rectangle(
-        self, sam: SAM2, square_frames: Path
-    ) -> None:
+    def test_tracks_translating_rectangle(self, sam: SAM2, square_frames: Path) -> None:
         session = sam.video(square_frames)
         session.add_points(frame_idx=0, obj_id=1, points=[[40, 65]], labels=[1])
         results = session.propagate()
@@ -188,9 +168,7 @@ class TestVideoTrackingEndToEnd:
         for _frame_idx, frame in results:
             assert frame.masks[1].sum() == pytest.approx(2000, rel=0.15)
 
-    def test_bidirectional_covers_whole_clip(
-        self, sam: SAM2, square_frames: Path
-    ) -> None:
+    def test_bidirectional_covers_whole_clip(self, sam: SAM2, square_frames: Path) -> None:
         session = sam.video(square_frames)
         session.add_points(frame_idx=3, obj_id=1, points=[[64, 65]], labels=[1])
         results = session.propagate_bidirectional()
@@ -223,9 +201,7 @@ class TestVideoTrackingEndToEnd:
         out = session.save(tmp_path / "masks")
         assert (out / "frame_000000" / "obj_0001.png").exists()
 
-    def test_overlay_mp4_is_written(
-        self, sam: SAM2, square_frames: Path, tmp_path: Path
-    ) -> None:
+    def test_overlay_mp4_is_written(self, sam: SAM2, square_frames: Path, tmp_path: Path) -> None:
         session = sam.video(square_frames)
         session.add_points(frame_idx=0, obj_id=1, points=[[40, 65]], labels=[1])
         session.propagate()
@@ -243,9 +219,7 @@ class TestVideoTrackingEndToEnd:
     ) -> None:
         """Passing an .mp4 should trigger extraction and still track."""
         video = tmp_path / "clip.mp4"
-        writer = cv2.VideoWriter(
-            str(video), cv2.VideoWriter.fourcc(*"mp4v"), 6.0, (128, 128)
-        )
+        writer = cv2.VideoWriter(str(video), cv2.VideoWriter.fourcc(*"mp4v"), 6.0, (128, 128))
         if not writer.isOpened():  # pragma: no cover - codec availability
             pytest.skip("No MP4 codec available in this OpenCV build.")
         try:
