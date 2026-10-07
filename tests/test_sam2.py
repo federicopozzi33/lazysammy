@@ -45,6 +45,22 @@ class _StubImageSegmenter:
         self.calls.append(("segment_multi_box", {"boxes": boxes}))
         return [ImagePrediction(masks=[Mask(data=np.ones((4, 4), dtype=bool), score=0.9)])]
 
+    def segment_multi_point(
+        self, image: Any, points_per_object: Any, **kwargs: Any
+    ) -> list[ImagePrediction]:
+        self.calls.append(
+            ("segment_multi_point", {"points_per_object": points_per_object, **kwargs})
+        )
+        return [ImagePrediction(masks=[Mask(data=np.ones((4, 4), dtype=bool), score=0.9)])]
+
+    def set_image(self, image: Any) -> tuple[int, int]:
+        self.calls.append(("set_image", {}))
+        return (4, 4)
+
+    def predict(self, **kwargs: Any) -> ImagePrediction:
+        self.calls.append(("predict", kwargs))
+        return ImagePrediction(masks=[Mask(data=np.ones((4, 4), dtype=bool), score=0.9)])
+
     def segment_batch(self, images: Any, **kwargs: Any) -> list[ImagePrediction]:
         self.calls.append(("segment_batch", kwargs))
         return [ImagePrediction(masks=[Mask(data=np.ones((4, 4), dtype=bool), score=0.9)])]
@@ -149,6 +165,20 @@ class TestSAM2ImageDelegation:
         out = sam.segment_multi_box(small_image, [[1, 2, 3, 4]])
         assert len(out) == 1
 
+    def test_segment_multi_point_delegates(self, small_image: np.ndarray) -> None:
+        sam = _stubbed_sam()
+        out = sam.segment_multi_point(small_image, [[[1, 2]]])
+        assert len(out) == 1
+        assert sam._image_segmenter.calls[0][0] == "segment_multi_point"  # type: ignore[union-attr]
+
+    def test_set_image_and_predict_delegate(self, small_image: np.ndarray) -> None:
+        sam = _stubbed_sam()
+        assert sam.set_image(small_image) == (4, 4)
+        pred = sam.predict(points=[[1, 2]], labels=[1])
+        assert isinstance(pred, ImagePrediction)
+        names = [name for name, _ in sam._image_segmenter.calls]  # type: ignore[union-attr]
+        assert names == ["set_image", "predict"]
+
     def test_segment_batch_delegates(self, small_image: np.ndarray) -> None:
         sam = _stubbed_sam()
         out = sam.segment_batch([small_image])
@@ -192,6 +222,29 @@ class TestSAM2AutoDelegation:
         assert created["use_m2m"] is True
         # Defaults are filled in for the options that were not supplied.
         assert created["pred_iou_thresh"] == pytest.approx(0.8)
+
+    def test_tuned_segmenter_is_cached_across_calls(
+        self, small_image: np.ndarray, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: each tuned call rebuilt the segmenter and reloaded weights."""
+        created: list[dict[str, Any]] = []
+
+        class _Tuned:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                created.append(kwargs)
+
+            def generate(self, image: Any) -> AutoMaskResult:
+                return AutoMaskResult(masks=[], image_shape=(4, 4))
+
+        monkeypatch.setattr("lazysammy.sam2.AutoSegmenter", _Tuned)
+
+        sam = _stubbed_sam()
+        sam.auto_segment(small_image, points_per_side=8)
+        sam.auto_segment(small_image, points_per_side=8)
+        # A different setting must build a separate instance.
+        sam.auto_segment(small_image, points_per_side=16)
+
+        assert len(created) == 2
 
 
 class TestSAM2VideoDelegation:

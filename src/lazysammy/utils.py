@@ -183,6 +183,9 @@ def extract_frames(
     if max_frames is not None and max_frames < 1:
         msg = f"max_frames must be >= 1 when provided; got {max_frames}."
         raise ValueError(msg)
+    if frame_format not in {"jpg", "jpeg", "png"}:
+        msg = f"frame_format must be 'jpg' or 'png'; got {frame_format!r}."
+        raise ValueError(msg)
 
     video_path = Path(video_path)
     if not video_path.is_file():
@@ -224,7 +227,10 @@ def extract_frames(
             break
         if idx % every_n == 0:
             out_path = output_dir / f"{saved:05d}.{frame_format}"
-            cv2.imwrite(str(out_path), frame)
+            if not cv2.imwrite(str(out_path), frame):
+                cap.release()
+                msg = f"Failed to write frame to {out_path}"
+                raise RuntimeError(msg)
             saved += 1
             if max_frames is not None and saved >= max_frames:
                 break
@@ -348,6 +354,42 @@ def save_masks_as_npy(
     return paths
 
 
+def mask_to_rle(mask: npt.NDArray[np.bool_]) -> dict[str, Any]:
+    """Encode a single binary mask to COCO-style RLE.
+
+    Args:
+        mask: ``(H, W)`` boolean mask.
+
+    Returns:
+        A dict with ``"size"`` (``[H, W]``) and ``"counts"`` (UTF-8 string).
+    """
+    from pycocotools import mask as mask_utils
+
+    fortran = np.asfortranarray(mask.astype(np.uint8))
+    rle = mask_utils.encode(fortran)
+    rle["counts"] = rle["counts"].decode("utf-8")
+    return dict(rle)
+
+
+def rle_to_mask(rle: dict[str, Any]) -> npt.NDArray[np.bool_]:
+    """Decode a COCO-style RLE dict into a boolean ``(H, W)`` mask.
+
+    Args:
+        rle: A dict with ``"size"`` and ``"counts"`` keys, as produced by
+            :func:`mask_to_rle` or :meth:`lazysammy.types.Mask.to_rle`.
+
+    Returns:
+        ``(H, W)`` boolean mask.
+    """
+    from pycocotools import mask as mask_utils
+
+    counts = rle["counts"]
+    if isinstance(counts, str):
+        counts = counts.encode("utf-8")
+    decoded = mask_utils.decode({"size": rle["size"], "counts": counts})
+    return np.asarray(decoded).astype(bool)
+
+
 def masks_to_rle(masks: npt.NDArray[np.bool_]) -> list[dict[str, Any]]:
     """Encode binary masks to COCO-style RLE format.
 
@@ -357,15 +399,7 @@ def masks_to_rle(masks: npt.NDArray[np.bool_]) -> list[dict[str, Any]]:
     Returns:
         List of dicts with ``"size"`` and ``"counts"`` keys.
     """
-    from pycocotools import mask as mask_utils
-
-    rles: list[dict[str, Any]] = []
-    for m in masks:
-        fortran = np.asfortranarray(m.astype(np.uint8))
-        rle = mask_utils.encode(fortran)
-        rle["counts"] = rle["counts"].decode("utf-8")
-        rles.append(rle)
-    return rles
+    return [mask_to_rle(m) for m in masks]
 
 
 def save_masks_as_coco_rle(
@@ -384,15 +418,11 @@ def save_masks_as_coco_rle(
     Returns:
         List of written file paths.
     """
-    from pycocotools import mask as mask_utils
-
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for name, mask in masks.items():
-        fortran = np.asfortranarray(mask.astype(np.uint8))
-        rle = mask_utils.encode(fortran)
-        rle["counts"] = rle["counts"].decode("utf-8")
+        rle = mask_to_rle(mask)
         p = out / f"{name}.json"
         p.write_text(json.dumps(rle))
         paths.append(p)

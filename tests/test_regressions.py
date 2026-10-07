@@ -148,3 +148,97 @@ class TestVideoResultsAccess:
         results = self._results()
         pairs = list(results)
         assert [idx for idx, _ in pairs] == [0, 5]
+
+
+class TestReturnLogitsThresholding:
+    """Regression: return_logits=True stored raw logits as truthy booleans.
+
+    ``astype(bool)`` maps every non-zero logit (including negative ones) to
+    ``True``, so a logit mask was silently inverted. Logits must be
+    thresholded at 0 instead.
+    """
+
+    def test_negative_logits_become_background(self) -> None:
+        from lazysammy.image import ImageSegmenter
+
+        logits = np.array([[[-2.0, 3.0], [0.5, -0.1]]], dtype=np.float32)
+        scores = np.array([0.9], dtype=np.float32)
+        pred = ImageSegmenter._to_image_prediction(
+            logits, scores, None, image_shape=(2, 2), return_logits=True
+        )
+        assert pred.masks[0].data.tolist() == [[False, True], [True, False]]
+
+    def test_boolean_masks_are_passed_through(self) -> None:
+        from lazysammy.image import ImageSegmenter
+
+        masks = np.array([[[True, False], [False, True]]])
+        scores = np.array([0.9], dtype=np.float32)
+        pred = ImageSegmenter._to_image_prediction(
+            masks, scores, None, image_shape=(2, 2), return_logits=False
+        )
+        assert pred.masks[0].data.tolist() == [[True, False], [False, True]]
+
+
+class TestMaskInputNormalization:
+    """Regression: a 2D mask_input was passed through unbatched to SAM 2."""
+
+    def test_2d_mask_input_is_promoted_to_3d(self) -> None:
+        from lazysammy.image import ImageSegmenter
+
+        captured: dict[str, object] = {}
+
+        class _Predictor:
+            def set_image(self, image: np.ndarray) -> None:
+                pass
+
+            def predict(self, **kwargs: object):
+                captured.update(kwargs)
+                return (
+                    np.ones((1, 4, 4), dtype=bool),
+                    np.array([0.9], dtype=np.float32),
+                    None,
+                )
+
+        segmenter = ImageSegmenter.__new__(ImageSegmenter)
+        segmenter._device = torch.device("cpu")
+        segmenter._predictor = _Predictor()
+
+        segmenter.segment(
+            np.zeros((8, 8, 3), dtype=np.uint8),
+            mask_input=np.zeros((256, 256), dtype=np.float32),
+        )
+
+        assert captured["mask_input"].shape == (1, 256, 256)
+
+
+class TestVosOptimizedForwarding:
+    """Regression: vos_optimized was dropped on the HuggingFace video path."""
+
+    def test_hf_video_path_forwards_vos_optimized(self, monkeypatch) -> None:
+        import sam2.sam2_video_predictor as vp
+
+        from lazysammy import models
+
+        captured: dict[str, object] = {}
+
+        class _FakePredictor:
+            @classmethod
+            def from_pretrained(cls, model_id: str, **kwargs: object) -> str:
+                captured["model_id"] = model_id
+                captured.update(kwargs)
+                return "predictor"
+
+        monkeypatch.setattr(vp, "SAM2VideoPredictor", _FakePredictor)
+
+        result = models.load_video_predictor("large", device="cpu", vos_optimized=True)
+
+        assert result == "predictor"
+        assert captured["vos_optimized"] is True
+
+
+class TestExtractFramesFormatValidation:
+    """Regression: an unsupported frame_format failed silently mid-extraction."""
+
+    def test_rejects_unknown_frame_format(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="frame_format"):
+            extract_frames(tmp_path / "missing.mp4", frame_format="bmp")

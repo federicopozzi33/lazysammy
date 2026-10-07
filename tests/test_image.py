@@ -72,3 +72,97 @@ class TestSegmentMultiBox:
 
         image = np.zeros((8, 8, 3), dtype=np.uint8)
         assert segmenter.segment_multi_box(image, boxes=[]) == []
+
+
+class _CountingPredictor:
+    """Predictor stub that counts ``set_image`` calls."""
+
+    def __init__(self) -> None:
+        self.set_image_calls = 0
+        self.predict_calls = 0
+
+    def set_image(self, image: np.ndarray) -> None:
+        self.set_image_calls += 1
+
+    def predict(self, **kwargs: object) -> tuple[np.ndarray, np.ndarray, None]:
+        self.predict_calls += 1
+        return (
+            np.ones((1, 4, 4), dtype=bool),
+            np.array([0.9], dtype=np.float32),
+            None,
+        )
+
+
+def _counting_segmenter() -> tuple[ImageSegmenter, _CountingPredictor]:
+    segmenter = ImageSegmenter.__new__(ImageSegmenter)
+    segmenter._device = torch.device("cpu")
+    segmenter._cached_image_key = None
+    segmenter._cached_image_shape = None
+    predictor = _CountingPredictor()
+    segmenter._predictor = predictor
+    return segmenter, predictor
+
+
+class TestImageCaching:
+    """Regression: every prompt re-ran the image encoder."""
+
+    def test_repeated_prompts_on_same_array_encode_once(self) -> None:
+        segmenter, predictor = _counting_segmenter()
+        image = np.zeros((8, 8, 3), dtype=np.uint8)
+
+        segmenter.segment(image, points=[[1, 1]], labels=[1])
+        segmenter.segment(image, points=[[2, 2]], labels=[1])
+        segmenter.segment(image, points=[[3, 3]], labels=[1])
+
+        assert predictor.set_image_calls == 1
+        assert predictor.predict_calls == 3
+
+    def test_different_arrays_re_encode(self) -> None:
+        segmenter, predictor = _counting_segmenter()
+        segmenter.segment(np.zeros((8, 8, 3), dtype=np.uint8), points=[[1, 1]], labels=[1])
+        segmenter.segment(np.ones((8, 8, 3), dtype=np.uint8), points=[[1, 1]], labels=[1])
+        assert predictor.set_image_calls == 2
+
+    def test_set_image_then_predict_skips_encoding(self) -> None:
+        segmenter, predictor = _counting_segmenter()
+        image = np.zeros((8, 8, 3), dtype=np.uint8)
+
+        segmenter.set_image(image)
+        segmenter.predict(points=[[1, 1]], labels=[1])
+        segmenter.predict(points=[[2, 2]], labels=[1])
+
+        assert predictor.set_image_calls == 1
+        assert predictor.predict_calls == 2
+
+    def test_predict_without_set_image_raises(self) -> None:
+        segmenter, _ = _counting_segmenter()
+        with pytest.raises(RuntimeError, match="set_image"):
+            segmenter.predict(points=[[1, 1]], labels=[1])
+
+
+class TestSegmentMultiPoint:
+    def test_one_prediction_per_object(self) -> None:
+        segmenter, predictor = _counting_segmenter()
+        image = np.zeros((8, 8, 3), dtype=np.uint8)
+
+        results = segmenter.segment_multi_point(
+            image,
+            points_per_object=[[[1, 1]], [[2, 2], [3, 3]]],
+        )
+
+        assert len(results) == 2
+        assert predictor.set_image_calls == 1
+        assert predictor.predict_calls == 2
+
+    def test_empty_returns_empty(self) -> None:
+        segmenter, _ = _counting_segmenter()
+        assert segmenter.segment_multi_point(np.zeros((8, 8, 3), dtype=np.uint8), []) == []
+
+    def test_mismatched_labels_raise(self) -> None:
+        segmenter, _ = _counting_segmenter()
+        with pytest.raises(ValueError, match="same length"):
+            segmenter.segment_multi_point(
+                np.zeros((8, 8, 3), dtype=np.uint8),
+                points_per_object=[[[1, 1]], [[2, 2]]],
+                labels_per_object=[[1]],
+            )

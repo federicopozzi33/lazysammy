@@ -45,7 +45,7 @@ _NO_PROMPTS_HTML = (
 )
 
 # ---------------------------------------------------------------------------
-# Global model cache (lazy: loaded once on first use per (model_size, device))
+# Global model cache (lazy: loaded once on first use per model size)
 #
 # SAM 2 predictors hold GPU memory and are not thread-safe, so construction is
 # guarded by a lock and every inference call is serialised through it. This
@@ -258,7 +258,10 @@ def _extract_video_frames(
 
     try:
         frames_dir = extract_frames(
-            video_path, every_n=int(every_n), max_frames=int(max_frames) or None
+            video_path,
+            every_n=int(every_n),
+            max_frames=int(max_frames) or None,
+            clean=True,
         )
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         return [], f"Error: Frame extraction failed: {exc}", None, 0
@@ -349,24 +352,6 @@ def _draw_video_prompts(
                 cv2.LINE_AA,
             )
     return out
-
-
-def _format_prompts(prompts: list[dict]) -> str:
-    lines = []
-    for i, p in enumerate(prompts):
-        if p["type"] == "point":
-            pts = ", ".join(
-                f"({pt[0]:.0f},{pt[1]:.0f}){'fg' if lb == 1 else 'bg'}"
-                for pt, lb in zip(p["points"], p["labels"], strict=False)
-            )
-            lines.append(f"[{i}] Frame {p['frame_idx']} | Obj {p['obj_id']} | points: {pts}")
-        elif p["type"] == "box":
-            b = p["box"]
-            lines.append(
-                f"[{i}] Frame {p['frame_idx']} | Obj {p['obj_id']} | "
-                f"box: ({b[0]:.0f},{b[1]:.0f})-({b[2]:.0f},{b[3]:.0f})"
-            )
-    return "\n".join(lines) if lines else "(no prompts yet)"
 
 
 def _format_prompts_html(prompts: list[dict]) -> str:
@@ -553,6 +538,321 @@ def _gradio_major_version() -> int:
         return 0
 
 
+# =========================================================================
+# Image-tab prompt bookkeeping (pure helpers, unit-testable)
+#
+# These live at module level rather than as closures inside build_app() so the
+# prompt logic can be tested directly, without a running Gradio server.
+# =========================================================================
+
+
+def _format_img_prompts(points: list[Any], box: list[Any]) -> str:
+    """Render the image-tab prompt list as a compact one-line string."""
+    parts = []
+    for p in points:
+        kind = "fg" if int(p[2]) == 1 else "bg"
+        parts.append(f"({p[0]:.0f}, {p[1]:.0f}) {kind}")
+    if len(box) == 1:
+        parts.append(f"box corner 1: ({box[0][0]:.0f}, {box[0][1]:.0f}): click 2nd corner")
+    if len(box) >= 2:
+        parts.append(f"box: ({box[0][0]:.0f},{box[0][1]:.0f}) to ({box[1][0]:.0f},{box[1][1]:.0f})")
+    return " | ".join(parts) if parts else ""
+
+
+def _redraw_input(
+    original: np.ndarray | None, points: list[Any], box: list[Any]
+) -> np.ndarray | None:
+    """Return a copy of *original* with the current prompts drawn on it."""
+    if original is None:
+        return None
+    out = original.copy()
+    if points:
+        out = _draw_points_on_image(out, points)
+    if box:
+        out = _draw_box_corners_on_image(out, box)
+    return out
+
+
+def apply_image_click(
+    original: np.ndarray | None,
+    points: list[Any],
+    box_corners: list[Any],
+    mode: str,
+    x: float,
+    y: float,
+) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+    """Apply one image-tab click and return the updated state.
+
+    Returns:
+        ``(annotated_image, points, box_corners, display_text)``.
+    """
+    if original is None:
+        return original, points, box_corners, ""
+
+    if _is_box_mode(mode):
+        box_corners = [*box_corners, [x, y]]
+        if len(box_corners) > 2:
+            box_corners = [[x, y]]
+    else:
+        label = _label_for_mode(mode)
+        points = [*points, [x, y, label]]
+
+    display = _format_img_prompts(points, box_corners)
+    annotated = _redraw_input(original, points, box_corners)
+    return annotated, points, box_corners, display
+
+
+def undo_last_prompt(
+    original: np.ndarray | None,
+    points: list[Any],
+    box_corners: list[Any],
+    mode: str,
+) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+    """Undo the most recent image-tab prompt (point or box corner)."""
+    if _is_box_mode(mode):
+        box_corners = box_corners[:-1] if box_corners else []
+    else:
+        points = points[:-1] if points else []
+    display = _format_img_prompts(points, box_corners)
+    annotated = _redraw_input(original, points, box_corners)
+    return annotated, points, box_corners, display
+
+
+def clear_prompts(
+    original: np.ndarray | None,
+) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+    """Clear all image-tab prompts, returning a fresh copy of the image."""
+    out = original.copy() if original is not None else None
+    return out, [], [], ""
+
+
+def select_segmentation_mode(
+    points: list[Any], box_corners: list[Any]
+) -> tuple[str, list[float] | None]:
+    """Choose box vs point segmentation for the image tab.
+
+    A completed box takes precedence over points.
+
+    Returns:
+        ``("box", [x1, y1, x2, y2])``, ``("points", None)``, or ``("none", None)``.
+    """
+    if len(box_corners) >= 2:
+        flat = [
+            box_corners[0][0],
+            box_corners[0][1],
+            box_corners[1][0],
+            box_corners[1][1],
+        ]
+        return "box", flat
+    if points:
+        return "points", None
+    return "none", None
+
+
+def _on_image_upload(
+    img: np.ndarray | None,
+) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+    """Reset prompt state when a new image is uploaded."""
+    return img, [], [], _render_mode_instruction(MODE_FOREGROUND)
+
+
+def _on_image_click(
+    original: np.ndarray | None,
+    points: list[Any],
+    box_corners: list[Any],
+    mode: str,
+    evt: gr.SelectData,
+) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+    """Gradio ``select`` adapter: unpack the click coordinates."""
+    x, y = evt.index[0], evt.index[1]
+    return apply_image_click(original, points, box_corners, mode, x, y)
+
+
+def _segment(
+    original: np.ndarray | None,
+    points: list[Any],
+    box_corners: list[Any],
+    ms: str,
+    multimask: bool,
+) -> tuple[np.ndarray | None, str]:
+    """Dispatch image-tab segmentation to box or point mode."""
+    if original is None:
+        return None, "Upload an image first."
+    kind, flat = select_segmentation_mode(points, box_corners)
+    if kind == "box" and flat is not None:
+        return _segment_with_box(original, flat, ms)
+    if kind == "points":
+        return _segment_with_points(original, points, ms, multimask)
+    return original, "Add some prompts first (click on the image)."
+
+
+# =========================================================================
+# Video-tab event handlers (module level, unit-testable)
+# =========================================================================
+
+
+def _on_extract(
+    video_path: str | None, every_n: int, max_frames: int
+) -> tuple[
+    list[str],
+    str,
+    str | None,
+    int,
+    Any,
+    np.ndarray | None,
+    np.ndarray | None,
+    list[Any],
+    list[Any],
+    str,
+    str,
+]:
+    """Extract frames from an uploaded video and reset the video-tab state."""
+    ff, info, fd, nf = _extract_video_frames(
+        video_path,
+        every_n,
+        int(max_frames) or 0,
+    )
+    first = _get_frame_image(ff, 0)
+    slider_update = gr.Slider(maximum=max(0, nf - 1), value=0)
+    counter = f'<div class="frame-counter">Frame 0 / {max(0, nf - 1)}</div>'
+    return (
+        ff,
+        info,
+        fd,
+        nf,
+        slider_update,
+        first,
+        first,
+        [],
+        [],
+        counter,
+        _NO_PROMPTS_HTML,
+    )
+
+
+def _on_slider_change(
+    frame_files: list[str],
+    idx: int,
+    prompts: list[Any],
+    vid_box: list[Any],
+    num_frames: int,
+) -> tuple[np.ndarray | None, np.ndarray | None, str]:
+    """Redraw the preview when the frame slider moves."""
+    idx = int(idx)
+    total = max(0, int(num_frames) - 1)
+    clean = _get_frame_image(frame_files, idx)
+    annotated = _draw_video_prompts(clean, prompts, idx)
+    if vid_box and annotated is not None:
+        annotated = _draw_box_corners_on_image(annotated, vid_box)
+    counter = f'<div class="frame-counter">Frame {idx} / {total}</div>'
+    return annotated, clean, counter
+
+
+def _on_frame_click(
+    clean_frame: np.ndarray | None,
+    prompts: list[Any],
+    vid_box: list[Any],
+    frame_slider_val: int,
+    obj_id: int,
+    mode: str,
+    evt: gr.SelectData,
+) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+    """Gradio ``select`` adapter for the video frame preview."""
+    if clean_frame is None:
+        return None, prompts, vid_box, _format_prompts_html(prompts)
+
+    x, y = evt.index[0], evt.index[1]
+    frame_idx = int(frame_slider_val)
+    obj_id = int(obj_id)
+
+    if _is_box_mode(mode):
+        vid_box = [*vid_box, [x, y]]
+        if len(vid_box) == 2:
+            bx1 = min(vid_box[0][0], vid_box[1][0])
+            by1 = min(vid_box[0][1], vid_box[1][1])
+            bx2 = max(vid_box[0][0], vid_box[1][0])
+            by2 = max(vid_box[0][1], vid_box[1][1])
+            prompts = [
+                *prompts,
+                {
+                    "type": "box",
+                    "frame_idx": frame_idx,
+                    "obj_id": obj_id,
+                    "box": [bx1, by1, bx2, by2],
+                },
+            ]
+            vid_box = []
+    else:
+        label = _label_for_mode(mode)
+        existing = None
+        for p in prompts:
+            if p["type"] == "point" and p["frame_idx"] == frame_idx and p["obj_id"] == obj_id:
+                existing = p
+                break
+        if existing is not None:
+            prompts = [
+                {**p, "points": [*p["points"], [x, y]], "labels": [*p["labels"], label]}
+                if p is existing
+                else p
+                for p in prompts
+            ]
+        else:
+            prompts = [
+                *prompts,
+                {
+                    "type": "point",
+                    "frame_idx": frame_idx,
+                    "obj_id": obj_id,
+                    "points": [[x, y]],
+                    "labels": [label],
+                },
+            ]
+
+    display = _format_prompts_html(prompts)
+    annotated = _draw_video_prompts(clean_frame, prompts, frame_idx)
+    if vid_box:
+        annotated = _draw_box_corners_on_image(annotated, vid_box)
+    return annotated, prompts, vid_box, display
+
+
+def _vid_undo(
+    clean_frame: np.ndarray | None,
+    prompts: list[Any],
+    vid_box: list[Any],
+    frame_slider_val: int,
+    mode: str,
+) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+    """Undo the most recent video-tab prompt (point or box corner)."""
+    frame_idx = int(frame_slider_val)
+    if _is_box_mode(mode) and vid_box:
+        vid_box = vid_box[:-1]
+    elif prompts:
+        last = prompts[-1]
+        if last["type"] == "point" and len(last["points"]) > 1:
+            prompts = [
+                *prompts[:-1],
+                {
+                    **last,
+                    "points": last["points"][:-1],
+                    "labels": last["labels"][:-1],
+                },
+            ]
+        else:
+            prompts = prompts[:-1]
+    display = _format_prompts_html(prompts)
+    annotated = _draw_video_prompts(clean_frame, prompts, frame_idx)
+    if vid_box:
+        annotated = _draw_box_corners_on_image(annotated, vid_box)
+    return annotated, prompts, vid_box, display
+
+
+def _vid_clear(
+    clean_frame: np.ndarray | None,
+) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+    """Clear all video-tab prompts."""
+    return clean_frame, [], [], _NO_PROMPTS_HTML
+
+
 def build_app() -> gr.Blocks:
     """Construct and return the Gradio Blocks app.
 
@@ -648,42 +948,13 @@ def build_app() -> gr.Blocks:
 
             # ---- Image tab helpers ----
 
-            def _format_img_prompts(pts: list[Any], box: list[Any]) -> str:
-                parts = []
-                for p in pts:
-                    kind = "fg" if int(p[2]) == 1 else "bg"
-                    parts.append(f"({p[0]:.0f}, {p[1]:.0f}) {kind}")
-                if len(box) == 1:
-                    parts.append(
-                        f"box corner 1: ({box[0][0]:.0f}, {box[0][1]:.0f}): click 2nd corner"
-                    )
-                if len(box) >= 2:
-                    parts.append(
-                        f"box: ({box[0][0]:.0f},{box[0][1]:.0f})"
-                        f" to ({box[1][0]:.0f},{box[1][1]:.0f})"
-                    )
-                return " | ".join(parts) if parts else ""
-
-            def _redraw_input(
-                original: np.ndarray | None, pts: list[Any], box: list[Any]
-            ) -> np.ndarray | None:
-                if original is None:
-                    return None
-                out = original.copy()
-                if pts:
-                    out = _draw_points_on_image(out, pts)
-                if box:
-                    out = _draw_box_corners_on_image(out, box)
-                return out
-
             # ---- Image tab events ----
 
-            def _on_image_upload(
-                img: np.ndarray | None,
-            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
-                return img, [], [], _render_mode_instruction(MODE_FOREGROUND)
-
-            img_input.change(
+            # NOTE: the upload/reset listener must use `.input()`, not `.change()`.
+            # `change` also fires for *programmatic* updates, and the click
+            # handler writes the annotated image back into `img_input`, so a
+            # `change` listener here would wipe the prompt state on every click.
+            img_input.input(
                 fn=_on_image_upload,
                 inputs=[img_input],
                 outputs=[current_img_state, points_state, box_state, click_instruction],
@@ -695,88 +966,23 @@ def build_app() -> gr.Blocks:
                 outputs=[click_instruction],
             )
 
-            def _on_image_click(
-                original: np.ndarray | None,
-                points: list[Any],
-                box_corners: list[Any],
-                mode: str,
-                evt: gr.SelectData,
-            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
-                if original is None:
-                    return original, points, box_corners, ""
-                x, y = evt.index[0], evt.index[1]
-
-                if _is_box_mode(mode):
-                    box_corners = [*box_corners, [x, y]]
-                    if len(box_corners) > 2:
-                        box_corners = [[x, y]]
-                else:
-                    label = _label_for_mode(mode)
-                    points = [*points, [x, y, label]]
-
-                display = _format_img_prompts(points, box_corners)
-                annotated = _redraw_input(original, points, box_corners)
-                return annotated, points, box_corners, display
-
             img_input.select(
                 fn=_on_image_click,
                 inputs=[current_img_state, points_state, box_state, prompt_mode],
                 outputs=[img_input, points_state, box_state, points_display],
             )
 
-            def _undo(
-                original: np.ndarray | None,
-                points: list[Any],
-                box_corners: list[Any],
-                mode: str,
-            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
-                if _is_box_mode(mode):
-                    box_corners = box_corners[:-1] if box_corners else []
-                else:
-                    points = points[:-1] if points else []
-                display = _format_img_prompts(points, box_corners)
-                annotated = _redraw_input(original, points, box_corners)
-                return annotated, points, box_corners, display
-
             undo_btn.click(
-                fn=_undo,
+                fn=undo_last_prompt,
                 inputs=[current_img_state, points_state, box_state, prompt_mode],
                 outputs=[img_input, points_state, box_state, points_display],
             )
 
-            def _clear_all(
-                original: np.ndarray | None,
-            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
-                out = original.copy() if original is not None else None
-                return out, [], [], ""
-
             clear_btn.click(
-                fn=_clear_all,
+                fn=clear_prompts,
                 inputs=[current_img_state],
                 outputs=[img_input, points_state, box_state, points_display],
             )
-
-            def _segment(
-                original: np.ndarray | None,
-                points: list[Any],
-                box_corners: list[Any],
-                ms: str,
-                multimask: bool,
-            ) -> tuple[np.ndarray | None, str]:
-                if original is None:
-                    return None, "Upload an image first."
-                # Prefer box if two corners are set
-                if len(box_corners) >= 2:
-                    flat = [
-                        box_corners[0][0],
-                        box_corners[0][1],
-                        box_corners[1][0],
-                        box_corners[1][1],
-                    ]
-                    return _segment_with_box(original, flat, ms)
-                if points:
-                    return _segment_with_points(original, points, ms, multimask)
-                return original, "Add some prompts first (click on the image)."
 
             segment_btn.click(
                 fn=_segment,
@@ -971,44 +1177,6 @@ def build_app() -> gr.Blocks:
 
             # ---- Video tab events ----
 
-            def _on_extract(
-                video_path: str | None, every_n: int, max_frames: int
-            ) -> tuple[
-                list[str],
-                str,
-                str | None,
-                int,
-                Any,
-                np.ndarray | None,
-                np.ndarray | None,
-                list[Any],
-                list[Any],
-                str,
-                str,
-            ]:
-                ff, info, fd, nf = _extract_video_frames(
-                    video_path,
-                    every_n,
-                    int(max_frames) or 0,
-                )
-                first = _get_frame_image(ff, 0)
-                slider_update = gr.Slider(maximum=max(0, nf - 1), value=0)
-                counter = f'<div class="frame-counter">Frame 0 / {max(0, nf - 1)}</div>'
-                empty_prompts = _NO_PROMPTS_HTML
-                return (
-                    ff,
-                    info,
-                    fd,
-                    nf,
-                    slider_update,
-                    first,
-                    first,
-                    [],
-                    [],
-                    counter,
-                    empty_prompts,
-                )
-
             extract_btn.click(
                 fn=_on_extract,
                 inputs=[video_input, extract_every_n, extract_max],
@@ -1027,23 +1195,10 @@ def build_app() -> gr.Blocks:
                 ],
             )
 
-            def _on_slider_change(
-                frame_files: list[str],
-                idx: int,
-                prompts: list[Any],
-                vid_box: list[Any],
-                num_frames: int,
-            ) -> tuple[np.ndarray | None, np.ndarray | None, str]:
-                idx = int(idx)
-                total = max(0, int(num_frames) - 1)
-                clean = _get_frame_image(frame_files, idx)
-                annotated = _draw_video_prompts(clean, prompts, idx)
-                if vid_box and annotated is not None:
-                    annotated = _draw_box_corners_on_image(annotated, vid_box)
-                counter = f'<div class="frame-counter">Frame {idx} / {total}</div>'
-                return annotated, clean, counter
-
-            frame_slider.change(
+            # The slider redraws the preview, so it must use `.input()` (user
+            # only) rather than `.change()`, which also fires on programmatic
+            # updates and would re-enter this handler.
+            frame_slider.input(
                 fn=_on_slider_change,
                 inputs=[
                     frame_files_state,
@@ -1061,83 +1216,10 @@ def build_app() -> gr.Blocks:
                 outputs=[vid_click_instruction],
             )
 
-            def _on_frame_click(
-                clean_frame: np.ndarray | None,
-                frame_files: list[str],
-                prompts: list[Any],
-                vid_box: list[Any],
-                frame_slider_val: int,
-                obj_id: int,
-                mode: str,
-                evt: gr.SelectData,
-            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
-                if clean_frame is None:
-                    return None, prompts, vid_box, _format_prompts_html(prompts)
-
-                x, y = evt.index[0], evt.index[1]
-                frame_idx = int(frame_slider_val)
-                obj_id = int(obj_id)
-
-                if _is_box_mode(mode):
-                    vid_box = [*vid_box, [x, y]]
-                    if len(vid_box) == 2:
-                        bx1 = min(vid_box[0][0], vid_box[1][0])
-                        by1 = min(vid_box[0][1], vid_box[1][1])
-                        bx2 = max(vid_box[0][0], vid_box[1][0])
-                        by2 = max(vid_box[0][1], vid_box[1][1])
-                        prompts = [
-                            *prompts,
-                            {
-                                "type": "box",
-                                "frame_idx": frame_idx,
-                                "obj_id": obj_id,
-                                "box": [bx1, by1, bx2, by2],
-                            },
-                        ]
-                        vid_box = []
-                    elif len(vid_box) > 2:
-                        vid_box = [[x, y]]
-                else:
-                    label = _label_for_mode(mode)
-                    existing = None
-                    for p in prompts:
-                        if (
-                            p["type"] == "point"
-                            and p["frame_idx"] == frame_idx
-                            and p["obj_id"] == obj_id
-                        ):
-                            existing = p
-                            break
-                    if existing is not None:
-                        prompts = [
-                            {**p, "points": [*p["points"], [x, y]], "labels": [*p["labels"], label]}
-                            if p is existing
-                            else p
-                            for p in prompts
-                        ]
-                    else:
-                        prompts = [
-                            *prompts,
-                            {
-                                "type": "point",
-                                "frame_idx": frame_idx,
-                                "obj_id": obj_id,
-                                "points": [[x, y]],
-                                "labels": [label],
-                            },
-                        ]
-
-                display = _format_prompts_html(prompts)
-                annotated = _draw_video_prompts(clean_frame, prompts, frame_idx)
-                if vid_box:
-                    annotated = _draw_box_corners_on_image(annotated, vid_box)
-                return annotated, prompts, vid_box, display
-
             frame_preview.select(
                 fn=_on_frame_click,
                 inputs=[
                     clean_frame_state,
-                    frame_files_state,
                     video_prompts_state,
                     vid_box_state,
                     frame_slider,
@@ -1151,35 +1233,6 @@ def build_app() -> gr.Blocks:
                     vid_prompts_display,
                 ],
             )
-
-            def _vid_undo(
-                clean_frame: np.ndarray | None,
-                prompts: list[Any],
-                vid_box: list[Any],
-                frame_slider_val: int,
-                mode: str,
-            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
-                frame_idx = int(frame_slider_val)
-                if _is_box_mode(mode) and vid_box:
-                    vid_box = vid_box[:-1]
-                elif prompts:
-                    last = prompts[-1]
-                    if last["type"] == "point" and len(last["points"]) > 1:
-                        prompts = [
-                            *prompts[:-1],
-                            {
-                                **last,
-                                "points": last["points"][:-1],
-                                "labels": last["labels"][:-1],
-                            },
-                        ]
-                    else:
-                        prompts = prompts[:-1]
-                display = _format_prompts_html(prompts)
-                annotated = _draw_video_prompts(clean_frame, prompts, frame_idx)
-                if vid_box:
-                    annotated = _draw_box_corners_on_image(annotated, vid_box)
-                return annotated, prompts, vid_box, display
 
             vid_undo_btn.click(
                 fn=_vid_undo,
@@ -1197,11 +1250,6 @@ def build_app() -> gr.Blocks:
                     vid_prompts_display,
                 ],
             )
-
-            def _vid_clear(
-                clean_frame: np.ndarray | None,
-            ) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
-                return clean_frame, [], [], _NO_PROMPTS_HTML
 
             vid_clear_btn.click(
                 fn=_vid_clear,

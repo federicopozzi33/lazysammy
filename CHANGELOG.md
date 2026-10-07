@@ -14,11 +14,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/make_comparison.py`, which derives the README's side-by-side figure
   from two real inference runs and refuses to write it unless the raw SAM 2 and
   `lazysammy` masks agree.
+- `combine_masks()`, `mask_to_bbox()`, and `mask_iou()` are now exported from the
+  top-level `lazysammy` package.
+- `mask_to_rle()` and `rle_to_mask()` encode/decode single masks to and from
+  COCO RLE in memory; `masks_to_rle()` is also exported.
+- `SAM2.segment()` accepts `return_logits` to keep raw logits instead of
+  thresholding.
+- `SAM2.set_image()` / `SAM2.predict()` split image encoding from prompting, so
+  many prompts on one image skip the image encoder. `segment()` and `refine()`
+  reuse the cached embedding automatically.
+- `SAM2.segment_multi_point()` segments several objects in one pass, each with
+  its own point prompts.
+- `Mask` gains `.bbox`, `.centroid`, `.iou()`, `.to_rle()`, `.from_rle()`, set
+  operators (`&`, `|`, `~`), numpy interop (`np.asarray`), and a compact repr.
+- `ImagePrediction` is now iterable and indexable, matching the other result
+  types.
+- `AutoMaskResult.sort_by()` and slice indexing; `VideoResults` slice indexing.
+- `to_dict()` / `from_dict()` on `Mask`, `AutoMask`, `AutoMaskResult`,
+  `ImagePrediction`, `FrameMasks`, and `VideoResults` for JSON-friendly
+  round-tripping (masks as COCO RLE).
 
 ### Changed
 
 - `extract_frames()` accepts `clean=True` and now warns when a re-extraction
   leaves a mix of frames from two different settings in the output directory.
+- `extract_frames()` validates `frame_format` and raises if a frame cannot be
+  written, instead of failing silently.
+- `SAM2.auto_segment()` caches tuned auto-segmenters by their settings, so
+  repeated calls with the same options no longer reload the model weights.
+- `SAM2.resolved_device` now reflects an already-created video or auto-mask
+  sub-component, not just the image segmenter.
+- `save_masks_as_coco_rle()` reuses the shared RLE encoder.
+- `scripts/build_notebook.py` now assigns deterministic cell ids, so
+  regenerating `examples/video_tracking.ipynb` produces a byte-identical file
+  instead of a spurious diff on every run.
+- The example notebook's bidirectional section now prompts on a mid-video frame
+  (the case bidirectional tracking exists for) and its mask-prompt section no
+  longer builds an unused frame.
+- The Gradio demo's prompt bookkeeping and event handlers are now module-level
+  functions instead of nested closures, so they can be unit-tested directly.
+
+### Fixed
+
+- The Gradio demo's image upload/reset listener used `gr.Image.change`, which
+  also fires on programmatic updates. Because the click handler writes the
+  annotated image back into the same component, every click re-entered the
+  upload handler and wiped the prompt state, so Segment always answered "Add
+  some prompts first". It now uses `.input()` (user-only). The frame slider had
+  the same problem and is fixed the same way.
+- The demo's video frame extraction now passes `clean=True`, so re-extracting
+  with different settings no longer mixes frames from two runs.
+- Removed a dead `_format_prompts` helper and an unreachable branch in the
+  video click handler.
+- `Mask` equality no longer raises `ValueError` on its numpy array field; the
+  dataclass `__eq__` is now numpy-safe (and `__hash__` is disabled, as the type
+  is mutable).
+- `Mask.save()` now infers the format from the file extension (`.png`, `.npy`,
+  `.json`) or an explicit `fmt=`, instead of always writing PNG and silently
+  ignoring the extension.
+- `vos_optimized=True` was silently ignored when loading the video predictor
+  from the HuggingFace Hub (the default path); it is now forwarded.
+- `segment(..., return_logits=True)` stored raw logits as booleans, so negative
+  logits were treated as foreground. Logits are now thresholded at `0`.
+- A 2D `mask_input` passed to `segment()` is now promoted to `(1, H, W)` before
+  being handed to SAM 2, which only batches 3D mask logits.
+- The README and CONTRIBUTING documented `uv sync --extra dev`, but `dev` is a
+  dependency group, not an extra; the commands now use `uv sync`.
 
 ## [0.1.0]
 

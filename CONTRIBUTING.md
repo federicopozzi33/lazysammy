@@ -11,13 +11,14 @@ This project uses [uv](https://docs.astral.sh/uv/) for dependency management.
 ```bash
 git clone https://github.com/federicopozzi33/easier-sam2.git
 cd easier-sam2
-uv sync --extra dev
+uv sync
 ```
 
+`uv sync` installs the `dev` dependency group (pytest, ruff, mypy) by default.
 For working on the notebook or demo, include those extras too:
 
 ```bash
-uv sync --extra dev --extra notebook --extra demo
+uv sync --extra notebook --extra demo
 ```
 
 ## Before you open a pull request

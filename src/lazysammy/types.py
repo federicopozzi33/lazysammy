@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
+from lazysammy.utils import mask_to_rle, rle_to_mask
 from lazysammy.validation import validate_nonempty_masks
 
 
@@ -94,6 +95,105 @@ class Mask:
         if self.area is None:
             self.area = int(self.data.sum())
 
+    # -- numpy interop ------------------------------------------------------
+
+    def __array__(self, dtype: Any = None) -> npt.NDArray[Any]:
+        """Expose the mask to numpy (``np.asarray(mask)``)."""
+        return np.asarray(self.data, dtype=dtype)
+
+    def __repr__(self) -> str:
+        """Return a compact repr that does not dump the whole array."""
+        h, w = self.data.shape if self.data.ndim == 2 else (0, 0)
+        return f"Mask(shape=({h}, {w}), score={self.score:.3f}, area={self.area})"
+
+    def __eq__(self, other: object) -> bool:
+        """Compare masks by value, tolerating numpy array fields."""
+        if not isinstance(other, Mask):
+            return NotImplemented
+        if self.score != other.score or self.area != other.area:
+            return False
+        if not np.array_equal(self.data, other.data):
+            return False
+        if (self.logits is None) != (other.logits is None):
+            return False
+        if self.logits is not None and other.logits is not None:
+            return bool(np.array_equal(self.logits, other.logits))
+        return True
+
+    __hash__ = None  # type: ignore[assignment]  # mutable, array-backed
+
+    # -- set operations -----------------------------------------------------
+
+    def _combine(self, other: Mask, op: Any) -> Mask:
+        if not isinstance(other, Mask):
+            return NotImplemented
+        if self.data.shape != other.data.shape:
+            msg = (
+                f"Cannot combine masks with different shapes: "
+                f"{self.data.shape} vs {other.data.shape}."
+            )
+            raise ValueError(msg)
+        return Mask(data=op(self.data, other.data), score=min(self.score, other.score))
+
+    def __and__(self, other: Mask) -> Mask:
+        """Intersection of two masks (``mask_a & mask_b``)."""
+        return self._combine(other, np.logical_and)
+
+    def __or__(self, other: Mask) -> Mask:
+        """Union of two masks (``mask_a | mask_b``)."""
+        return self._combine(other, np.logical_or)
+
+    def __invert__(self) -> Mask:
+        """Complement of the mask (``~mask``)."""
+        return Mask(data=np.logical_not(self.data), score=self.score)
+
+    # -- geometry -----------------------------------------------------------
+
+    @property
+    def bbox(self) -> list[int]:
+        """Bounding box as ``[x_min, y_min, x_max, y_max]`` (inclusive).
+
+        Raises:
+            ValueError: If the mask is empty.
+        """
+        if not np.any(self.data):
+            msg = "mask is empty; cannot compute a bounding box."
+            raise ValueError(msg)
+        rows = np.any(self.data, axis=1)
+        cols = np.any(self.data, axis=0)
+        y_min, y_max = np.where(rows)[0][[0, -1]]
+        x_min, x_max = np.where(cols)[0][[0, -1]]
+        return [int(x_min), int(y_min), int(x_max), int(y_max)]
+
+    @property
+    def centroid(self) -> tuple[float, float]:
+        """Centroid ``(x, y)`` of the mask.
+
+        Raises:
+            ValueError: If the mask is empty.
+        """
+        if not np.any(self.data):
+            msg = "mask is empty; cannot compute a centroid."
+            raise ValueError(msg)
+        ys, xs = np.nonzero(self.data)
+        return float(xs.mean()), float(ys.mean())
+
+    def iou(self, other: Mask) -> float:
+        """Intersection-over-Union with *other* in ``[0, 1]``."""
+        if self.data.shape != other.data.shape:
+            msg = (
+                f"Cannot compute IoU for masks with different shapes: "
+                f"{self.data.shape} vs {other.data.shape}."
+            )
+            raise ValueError(msg)
+        intersection = np.logical_and(self.data, other.data).sum()
+        union = np.logical_or(self.data, other.data).sum()
+        if union == 0:
+            return 0.0
+        return float(intersection / union)
+
+    # -- conversion ---------------------------------------------------------
+
     def numpy(self) -> npt.NDArray[np.bool_]:
         """Return the mask as a boolean numpy array."""
         return self.data
@@ -107,17 +207,86 @@ class Mask:
         """Return the mask as a uint8 array (0 or 255)."""
         return self.data.astype(np.uint8) * 255
 
-    def save(self, path: str | Path) -> None:
-        """Save the mask as a PNG file.
+    def to_rle(self) -> dict[str, Any]:
+        """Encode the mask as a COCO-style RLE dict (``size`` + ``counts``)."""
+        from lazysammy.utils import mask_to_rle
+
+        return mask_to_rle(self.data)
+
+    @classmethod
+    def from_rle(
+        cls,
+        rle: dict[str, Any],
+        *,
+        score: float = 0.0,
+    ) -> Mask:
+        """Decode a COCO-style RLE dict into a :class:`Mask`."""
+        from lazysammy.utils import rle_to_mask
+
+        return cls(data=rle_to_mask(rle), score=score)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a JSON-friendly dict (mask as COCO RLE)."""
+        return {"score": self.score, "area": self.area, "rle": self.to_rle()}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Mask:
+        """Reconstruct a :class:`Mask` from :meth:`to_dict` output."""
+        return cls.from_rle(data["rle"], score=float(data["score"]))
+
+    def save(self, path: str | Path, *, fmt: str | None = None) -> Path:
+        """Save the mask to disk.
+
+        The format is inferred from the file extension unless *fmt* is given.
 
         Args:
-            path: Destination ``.png`` path. Parent directories are created.
+            path: Destination path. Parent directories are created.
+            fmt: ``"png"``, ``"npy"``, or ``"coco_rle"``. When ``None`` the
+                extension decides (``.png``/``.npy``/``.json``); a path with no
+                extension defaults to PNG.
+
+        Returns:
+            The written path.
+
+        Raises:
+            ValueError: If the format is unsupported.
         """
+        import json
+
         import cv2
 
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(p), self.as_uint8())
+
+        if fmt is None:
+            suffix = p.suffix.lower()
+            if suffix in {"", ".png"}:
+                fmt = "png"
+            elif suffix == ".npy":
+                fmt = "npy"
+            elif suffix == ".json":
+                fmt = "coco_rle"
+            else:
+                msg = (
+                    f"Cannot infer a mask format from {p.suffix!r}; pass fmt= "
+                    "('png', 'npy', or 'coco_rle')."
+                )
+                raise ValueError(msg)
+
+        normalized = fmt.strip().lower()
+        if normalized == "png":
+            cv2.imwrite(str(p), self.as_uint8())
+        elif normalized == "npy":
+            # Write through a file handle so numpy does not append ".npy" and
+            # silently ignore the caller's chosen path.
+            with open(p, "wb") as handle:
+                np.save(handle, self.data)
+        elif normalized == "coco_rle":
+            p.write_text(json.dumps(self.to_rle()))
+        else:
+            msg = f"Unsupported mask format: {fmt!r}. Use 'png', 'npy', or 'coco_rle'."
+            raise ValueError(msg)
+        return p
 
 
 @dataclass
@@ -134,6 +303,14 @@ class ImagePrediction:
 
     def __len__(self) -> int:
         return len(self.masks)
+
+    def __iter__(self) -> Iterator[Mask]:
+        """Iterate over the predicted masks."""
+        return iter(self.masks)
+
+    def __getitem__(self, index: int) -> Mask:
+        """Return the mask at *index*."""
+        return self.masks[index]
 
     # -- convenience helpers ------------------------------------------------
 
@@ -153,6 +330,23 @@ class ImagePrediction:
     def as_uint8(self) -> npt.NDArray[np.uint8]:
         """Stack all masks into a ``(N, H, W)`` uint8 array (0/255)."""
         return (self.numpy().astype(np.uint8)) * 255
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a JSON-friendly dict (masks as COCO RLE)."""
+        return {
+            "image_shape": list(self.image_shape) if self.image_shape else None,
+            "masks": [{"score": m.score, "area": m.area, "rle": m.to_rle()} for m in self.masks],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ImagePrediction:
+        """Reconstruct an :class:`ImagePrediction` from :meth:`to_dict` output."""
+        shape = data.get("image_shape")
+        masks = [
+            Mask.from_rle(entry["rle"], score=float(entry["score"]))
+            for entry in data.get("masks", [])
+        ]
+        return cls(masks=masks, image_shape=tuple(shape) if shape else None)
 
 
 @dataclass
@@ -177,6 +371,59 @@ class AutoMask:
     crop_box: list[float]
     point_coords: list[list[float]] | None = None
 
+    def __array__(self, dtype: Any = None) -> npt.NDArray[Any]:
+        """Expose the mask to numpy (``np.asarray(auto_mask)``)."""
+        return np.asarray(self.data, dtype=dtype)
+
+    def __repr__(self) -> str:
+        """Return a compact repr that does not dump the whole array."""
+        h, w = self.data.shape if self.data.ndim == 2 else (0, 0)
+        return (
+            f"AutoMask(shape=({h}, {w}), score={self.score:.3f}, "
+            f"area={self.area}, stability={self.stability_score:.3f})"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        """Compare auto-masks by value, tolerating numpy array fields."""
+        if not isinstance(other, AutoMask):
+            return NotImplemented
+        return (
+            self.score == other.score
+            and self.area == other.area
+            and self.stability_score == other.stability_score
+            and self.bbox == other.bbox
+            and self.crop_box == other.crop_box
+            and self.point_coords == other.point_coords
+            and bool(np.array_equal(self.data, other.data))
+        )
+
+    __hash__ = None  # type: ignore[assignment]  # mutable, array-backed
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a JSON-friendly dict (mask as COCO RLE)."""
+        return {
+            "score": self.score,
+            "area": self.area,
+            "bbox": list(self.bbox),
+            "stability_score": self.stability_score,
+            "crop_box": list(self.crop_box),
+            "point_coords": self.point_coords,
+            "rle": mask_to_rle(self.data),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AutoMask:
+        """Reconstruct an :class:`AutoMask` from :meth:`to_dict` output."""
+        return cls(
+            data=rle_to_mask(data["rle"]),
+            score=float(data["score"]),
+            area=int(data["area"]),
+            bbox=list(data["bbox"]),
+            stability_score=float(data["stability_score"]),
+            crop_box=list(data["crop_box"]),
+            point_coords=data.get("point_coords"),
+        )
+
 
 @dataclass
 class AutoMaskResult:
@@ -197,8 +444,10 @@ class AutoMaskResult:
         """Iterate over the generated masks (largest area first)."""
         return iter(self.masks)
 
-    def __getitem__(self, index: int) -> AutoMask:
-        """Return the mask at *index*."""
+    def __getitem__(self, index: int | slice) -> AutoMask | AutoMaskResult:
+        """Return the mask at *index*, or a new result for a slice."""
+        if isinstance(index, slice):
+            return AutoMaskResult(masks=self.masks[index], image_shape=self.image_shape)
         return self.masks[index]
 
     def numpy(self) -> npt.NDArray[np.bool_]:
@@ -220,6 +469,41 @@ class AutoMaskResult:
         filtered = [m for m in self.masks if m.score >= min_iou]
         return AutoMaskResult(masks=filtered, image_shape=self.image_shape)
 
+    def sort_by(self, key: str = "area", *, descending: bool = True) -> AutoMaskResult:
+        """Return a new result sorted by *key*.
+
+        Args:
+            key: One of ``"area"``, ``"score"``, or ``"stability_score"``.
+            descending: Sort largest/highest first (default).
+
+        Returns:
+            A new :class:`AutoMaskResult` with reordered masks.
+
+        Raises:
+            ValueError: If *key* is not a sortable attribute.
+        """
+        if key not in {"area", "score", "stability_score"}:
+            msg = f"sort_by key must be 'area', 'score', or 'stability_score'; got {key!r}."
+            raise ValueError(msg)
+        ordered = sorted(self.masks, key=lambda m: getattr(m, key), reverse=descending)
+        return AutoMaskResult(masks=ordered, image_shape=self.image_shape)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a JSON-friendly dict."""
+        return {
+            "image_shape": list(self.image_shape) if self.image_shape else None,
+            "masks": [m.to_dict() for m in self.masks],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AutoMaskResult:
+        """Reconstruct an :class:`AutoMaskResult` from :meth:`to_dict` output."""
+        shape = data.get("image_shape")
+        return cls(
+            masks=[AutoMask.from_dict(entry) for entry in data.get("masks", [])],
+            image_shape=tuple(shape) if shape else None,
+        )
+
 
 @dataclass
 class FrameMasks:
@@ -237,6 +521,33 @@ class FrameMasks:
     def object_ids(self) -> list[int]:
         """Return sorted list of object ids for this frame."""
         return sorted(self.masks.keys())
+
+    def __eq__(self, other: object) -> bool:
+        """Compare frames by value, tolerating numpy array fields."""
+        if not isinstance(other, FrameMasks):
+            return NotImplemented
+        if self.frame_idx != other.frame_idx:
+            return False
+        if self.masks.keys() != other.masks.keys():
+            return False
+        return all(bool(np.array_equal(self.masks[oid], other.masks[oid])) for oid in self.masks)
+
+    __hash__ = None  # type: ignore[assignment]  # mutable, array-backed
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a JSON-friendly dict (masks as COCO RLE)."""
+        return {
+            "frame_idx": self.frame_idx,
+            "masks": {str(oid): mask_to_rle(m) for oid, m in self.masks.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> FrameMasks:
+        """Reconstruct a :class:`FrameMasks` from :meth:`to_dict` output."""
+        return cls(
+            frame_idx=int(data["frame_idx"]),
+            masks={int(oid): rle_to_mask(rle) for oid, rle in data["masks"].items()},
+        )
 
 
 @dataclass
@@ -278,12 +589,26 @@ class VideoResults:
     def __len__(self) -> int:
         return len(self.frames)
 
-    def __getitem__(self, frame_idx: int) -> FrameMasks:
-        """Return :class:`FrameMasks` for *frame_idx*.
+    def __getitem__(self, frame_idx: int | slice) -> FrameMasks | VideoResults:
+        """Return :class:`FrameMasks` for *frame_idx*, or a sliced result.
+
+        Args:
+            frame_idx: A frame index, or a slice over the sorted frame list.
+
+        Returns:
+            A :class:`FrameMasks` for an integer index, or a new
+            :class:`VideoResults` for a slice.
 
         Raises:
             IndexError: If the frame was not tracked.
         """
+        if isinstance(frame_idx, slice):
+            selected = self.values()[frame_idx]
+            return VideoResults(
+                frames=selected,
+                video_dir=self.video_dir,
+                num_frames=self.num_frames,
+            )
         index = self._frame_index()
         if frame_idx not in index:
             msg = f"Frame {frame_idx} is not present in these results."
@@ -317,3 +642,21 @@ class VideoResults:
         for fm in self.frames:
             ids.update(fm.masks.keys())
         return ids
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a JSON-friendly dict (masks as COCO RLE)."""
+        return {
+            "video_dir": str(self.video_dir) if self.video_dir is not None else None,
+            "num_frames": self.num_frames,
+            "frames": [fm.to_dict() for fm in self.values()],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> VideoResults:
+        """Reconstruct a :class:`VideoResults` from :meth:`to_dict` output."""
+        video_dir = data.get("video_dir")
+        return cls(
+            frames=[FrameMasks.from_dict(entry) for entry in data.get("frames", [])],
+            video_dir=Path(video_dir) if video_dir else None,
+            num_frames=int(data.get("num_frames", 0)),
+        )

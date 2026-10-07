@@ -104,3 +104,43 @@ def test_readme_leads_with_motivation() -> None:
         position = readme.find(later)
         assert position != -1, f"README is missing {later}"
         assert motivation_at < position, f"Motivation should precede {later}"
+
+
+def test_notebook_matches_its_generator() -> None:
+    """The checked-in notebook must match what build_notebook.py produces.
+
+    The notebook is generated from reviewable Python source, so it should never
+    be edited by hand. This guards against the two drifting apart (and against
+    the generator regressing to non-deterministic cell ids).
+    """
+    nb_path = REPO_ROOT / "examples" / "video_tracking.ipynb"
+    if not nb_path.exists():
+        pytest.skip("Example notebook is not present.")
+
+    import importlib.util
+
+    import nbformat as nbf
+
+    script_path = REPO_ROOT / "scripts" / "build_notebook.py"
+    spec = importlib.util.spec_from_file_location("build_notebook", script_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    cells = module.cells
+
+    expected = nbf.v4.new_notebook(cells=cells)
+    for index, cell in enumerate(expected.cells):
+        cell["id"] = f"cell-{index:03d}"
+    expected.metadata["kernelspec"] = {
+        "display_name": "Python 3",
+        "language": "python",
+        "name": "python3",
+    }
+    expected.metadata["language_info"] = {"name": "python", "version": "3.10"}
+
+    actual = nbf.read(str(nb_path), as_version=4)
+    assert actual.cells == expected.cells, (
+        "examples/video_tracking.ipynb is out of sync with "
+        "scripts/build_notebook.py; run `uv run python scripts/build_notebook.py`."
+    )

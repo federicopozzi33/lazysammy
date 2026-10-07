@@ -58,7 +58,6 @@ high-level wrapper around Meta's [SAM 2](https://github.com/facebookresearch/sam
         """
 from pathlib import Path
 
-import cv2
 import matplotlib
 
 # Choose a matplotlib backend. 'widget' supports click-to-prompt (ipympl, from
@@ -361,14 +360,17 @@ backward from it.
     ),
     code(
         """
-session.reset()
+session.reset()   # reset() clears all prompts and tracking state
 
+# Prompt on a MID-video frame. Forward-only propagation would start here and
+# never look back; bidirectional tracking covers both sides of the prompt.
 mid = session.num_frames // 2
 session.add_points(frame_idx=mid, obj_id=1, points=[[350, 250]], labels=[1])
 
 results_bidir = session.propagate_bidirectional()
 tracked = [idx for idx, _ in results_bidir]
-print(f"Bidirectional: {len(results_bidir)} frame(s), from {tracked[0]} to {tracked[-1]}")
+print(f"Prompt on frame {mid}; tracked frames {tracked[0]}..{tracked[-1]}")
+print(f"Bidirectional: {len(results_bidir)} frame(s)")
 """
     ),
     md("### 4.2. Partial propagation"),
@@ -520,12 +522,13 @@ mask**, for example from another model or a manual annotation.
         """
 session.reset()
 
-# Build a simple mask from a previous prediction, then feed it back in.
-seed = session.get_frame(0)
+# A mask prompt is a *binary* (H, W) array (True/1 = object). In practice it
+# comes from another model or a manual annotation; here we derive one from a
+# quick point prediction so it is guaranteed to overlap the object.
 seed_result = session.add_points(frame_idx=0, obj_id=1, points=[[350, 250]], labels=[1])
 seed_mask = seed_result.masks[1]
 
-session.reset()
+session.reset()   # clear the point prompt; start fresh from the mask
 mask_result = session.add_mask(frame_idx=0, obj_id=1, mask=seed_mask)
 print(f"Initialised object 1 from a {seed_mask.shape} mask -> {mask_result.object_ids}")
 
@@ -632,6 +635,12 @@ auto = sam.auto_segment("photo.jpg")
 
 def main() -> None:
     """Write the notebook to disk."""
+    # Assign deterministic cell ids so regenerating the notebook produces a
+    # byte-identical file (nbformat otherwise generates a random id per cell,
+    # which makes every rebuild show up as a spurious diff).
+    for index, cell in enumerate(cells):
+        cell["id"] = f"cell-{index:03d}"
+
     nb = nbf.v4.new_notebook(cells=cells)
     nb.metadata["kernelspec"] = {
         "display_name": "Python 3",

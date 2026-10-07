@@ -163,7 +163,9 @@ def load_video_predictor(
         from sam2.sam2_video_predictor import SAM2VideoPredictor
 
         logger.info("Loading SAM2VideoPredictor from HuggingFace: %s", model_size_str)
-        return SAM2VideoPredictor.from_pretrained(model_size_str, device=dev, **kwargs)
+        return SAM2VideoPredictor.from_pretrained(
+            model_size_str, device=dev, vos_optimized=vos_optimized, **kwargs
+        )
 
     size = resolve_model_size(model_size)
 
@@ -181,7 +183,9 @@ def load_video_predictor(
 
     hf_id = HF_MODEL_IDS[size]
     logger.info("Loading SAM2VideoPredictor from HuggingFace: %s", hf_id)
-    return SAM2VideoPredictor.from_pretrained(hf_id, device=dev, **kwargs)
+    return SAM2VideoPredictor.from_pretrained(
+        hf_id, device=dev, vos_optimized=vos_optimized, **kwargs
+    )
 
 
 def load_auto_mask_generator(

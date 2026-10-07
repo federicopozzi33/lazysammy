@@ -83,6 +83,9 @@ class SAM2:
         self._image_segmenter: ImageSegmenter | None = None
         self._video_tracker: VideoTracker | None = None
         self._auto_segmenter: AutoSegmenter | None = None
+        # Cache of tuned auto-segmenters keyed by their settings, so repeated
+        # calls with the same options do not reload the model weights.
+        self._tuned_auto_segmenters: dict[tuple[Any, ...], AutoSegmenter] = {}
 
     # ------------------------------------------------------------------
     # Configuration accessors
@@ -119,8 +122,13 @@ class SAM2:
         Returns:
             The resolved :class:`torch.device`.
         """
-        if self._image_segmenter is not None:
-            return self._image_segmenter.device
+        for component in (
+            self._image_segmenter,
+            self._video_tracker,
+            self._auto_segmenter,
+        ):
+            if component is not None:
+                return component.device
         return torch.device(auto_detect_device(self._device))
 
     # ------------------------------------------------------------------
@@ -174,6 +182,7 @@ class SAM2:
         box: BoundingBox | None = None,
         mask_input: MaskLogits | None = None,
         multimask_output: bool = True,
+        return_logits: bool = False,
     ) -> ImagePrediction:
         """Segment an image with point, box, or mask prompts.
 
@@ -186,6 +195,7 @@ class SAM2:
             box: ``[x1, y1, x2, y2]`` bounding box.
             mask_input: Low-res mask **logits** from a previous prediction.
             multimask_output: Return 3 masks for ambiguous prompts.
+            return_logits: Keep raw logits instead of thresholding.
 
         Returns:
             :class:`ImagePrediction` containing the masks.
@@ -197,6 +207,7 @@ class SAM2:
             box=box,
             mask_input=mask_input,
             multimask_output=multimask_output,
+            return_logits=return_logits,
         )
 
     def segment_point(
@@ -254,6 +265,80 @@ class SAM2:
             Per-box :class:`ImagePrediction` list.
         """
         return self.image_segmenter.segment_multi_box(image, boxes)
+
+    def segment_multi_point(
+        self,
+        image: str | Path | npt.NDArray[np.uint8],
+        points_per_object: Sequence[Sequence[Sequence[float]]],
+        *,
+        labels_per_object: Sequence[Sequence[int]] | None = None,
+        multimask_output: bool = False,
+    ) -> list[ImagePrediction]:
+        """Segment multiple objects, each with its own point prompts.
+
+        The image is encoded once and reused for every object.
+
+        Args:
+            image: Image to segment.
+            points_per_object: One ``(N, 2)`` point list per object.
+            labels_per_object: One label list per object (defaults to all fg).
+            multimask_output: Return 3 masks per object for ambiguous prompts.
+
+        Returns:
+            Per-object :class:`ImagePrediction` list.
+        """
+        return self.image_segmenter.segment_multi_point(
+            image,
+            points_per_object,
+            labels_per_object=labels_per_object,
+            multimask_output=multimask_output,
+        )
+
+    def set_image(self, image: str | Path | npt.NDArray[np.uint8]) -> tuple[int, int]:
+        """Encode an image once so repeated prompts reuse the embedding.
+
+        Args:
+            image: File path or ``(H, W, 3)`` RGB uint8 array.
+
+        Returns:
+            The ``(H, W)`` shape of the encoded image.
+        """
+        return self.image_segmenter.set_image(image)
+
+    def predict(
+        self,
+        *,
+        points: PointCoords | None = None,
+        labels: PointLabels | None = None,
+        box: BoundingBox | None = None,
+        mask_input: MaskLogits | None = None,
+        multimask_output: bool = True,
+        return_logits: bool = False,
+    ) -> ImagePrediction:
+        """Run prompts against the image set by :meth:`set_image`.
+
+        This skips image encoding, so it is the fast path for many prompts on
+        one image.
+
+        Args:
+            points: ``(N, 2)`` point prompts as ``(x, y)`` coords.
+            labels: Length-N labels (``1`` = fg, ``0`` = bg).
+            box: ``[x1, y1, x2, y2]`` bounding box.
+            mask_input: Low-res mask **logits** from a previous prediction.
+            multimask_output: Return 3 masks for ambiguous prompts.
+            return_logits: Keep raw logits instead of thresholding.
+
+        Returns:
+            :class:`ImagePrediction` containing the masks.
+        """
+        return self.image_segmenter.predict(
+            points=points,
+            labels=labels,
+            box=box,
+            mask_input=mask_input,
+            multimask_output=multimask_output,
+            return_logits=return_logits,
+        )
 
     def refine(
         self,
@@ -395,16 +480,26 @@ class SAM2:
                 if v is not None
             }
         )
-        segmenter = AutoSegmenter(
-            self._model_size,
-            checkpoint=self._checkpoint,
-            device=self._device,
-            points_per_side=int(overrides["points_per_side"]),
-            pred_iou_thresh=float(overrides["pred_iou_thresh"]),
-            stability_score_thresh=float(overrides["stability_score_thresh"]),
-            min_mask_region_area=int(overrides["min_mask_region_area"]),
-            use_m2m=bool(overrides["use_m2m"]),
+        settings = (
+            int(overrides["points_per_side"]),
+            float(overrides["pred_iou_thresh"]),
+            float(overrides["stability_score_thresh"]),
+            int(overrides["min_mask_region_area"]),
+            bool(overrides["use_m2m"]),
         )
+        segmenter = self._tuned_auto_segmenters.get(settings)
+        if segmenter is None:
+            segmenter = AutoSegmenter(
+                self._model_size,
+                checkpoint=self._checkpoint,
+                device=self._device,
+                points_per_side=settings[0],
+                pred_iou_thresh=settings[1],
+                stability_score_thresh=settings[2],
+                min_mask_region_area=settings[3],
+                use_m2m=settings[4],
+            )
+            self._tuned_auto_segmenters[settings] = segmenter
         return segmenter.generate(image)
 
     # ------------------------------------------------------------------

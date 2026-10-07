@@ -15,6 +15,28 @@
 
 **A high-level, typed wrapper around [Meta's SAM 2](https://github.com/facebookresearch/sam2) for image segmentation and video object tracking.**
 
+`lazysammy` gives you one small, well-typed API for the three things people
+actually do with SAM 2 - segment an image, track an object through a video, and
+auto-segment everything - without the research-codebase glue.
+
+---
+
+## Table of contents
+
+- [Motivation](#motivation)
+- [What you get](#what-you-get)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Core workflows](#core-workflows)
+- [API at a glance](#api-at-a-glance)
+- [Result types](#result-types)
+- [Advanced usage](#advanced-usage)
+- [Notebooks and demo](#notebooks-and-demo)
+- [Development](#development)
+- [Contributing](#contributing)
+- [Citation](#citation)
+- [License](#license)
+
 ---
 
 ## Motivation
@@ -155,13 +177,21 @@ cd easier-sam2
 uv sync
 ```
 
-Extras:
+Optional extras:
 
 ```bash
 uv sync --extra viz       # matplotlib visualisation helpers
 uv sync --extra notebook  # jupyterlab + ipympl (for interactive clicking)
 uv sync --extra demo      # gradio demo app
-uv sync --extra dev       # pytest + ruff + mypy
+uv sync --extra all       # everything above
+```
+
+Development tools (pytest, ruff, mypy) live in the `dev` dependency group and
+are installed by a plain `uv sync`:
+
+```bash
+uv sync                  # includes the dev group
+uv sync --no-dev         # runtime dependencies only
 ```
 
 > `lazysammy` depends on SAM 2 directly from Meta's repository, so it is
@@ -281,6 +311,8 @@ session.reset()                                     # start over
 |------|------|---------|
 | Image segmentation | `sam.segment(...)` | `ImagePrediction` |
 | Batched images | `sam.segment_batch([...])` | `list[ImagePrediction]` |
+| Many prompts, one image | `sam.set_image(...)` + `sam.predict(...)` | `ImagePrediction` |
+| Multiple objects by points | `sam.segment_multi_point(...)` | `list[ImagePrediction]` |
 | Refinement | `sam.refine(...)` | `ImagePrediction` |
 | Auto-segmentation | `sam.auto_segment(...)` | `AutoMaskResult` |
 | Start a video session | `sam.video(...)` | `VideoSession` |
@@ -296,15 +328,35 @@ Every result is a typed dataclass you can inspect, iterate, and serialise.
 
 | Type | Description |
 |------|-------------|
-| `Mask` | Binary mask with `.score`, `.area`, `.logits`, `.numpy()`, `.as_uint8()`, `.save()` |
-| `ImagePrediction` | Masks from one image call; `.best_mask` is the highest-scoring one |
+| `Mask` | Binary mask with `.score`, `.area`, `.logits`, `.bbox`, `.centroid`, `.iou()`, `.numpy()`, `.as_uint8()`, `.to_rle()`, `.save()` |
+| `ImagePrediction` | Masks from one image call; iterable, indexable, `.best_mask` is the highest-scoring one |
 | `AutoMask` | One auto-generated mask with area, bbox, and stability score |
-| `AutoMaskResult` | Iterable collection with `.filter_by_area()` / `.filter_by_iou()` |
+| `AutoMaskResult` | Iterable collection with `.filter_by_area()` / `.filter_by_iou()` / `.sort_by()` |
 | `FrameMasks` | Object masks for one video frame; `.object_ids`, `.masks` |
-| `VideoResults` | Full tracked sequence; iterable, indexable, `.get_object_masks()` |
+| `VideoResults` | Full tracked sequence; iterable, indexable, sliceable, `.get_object_masks()` |
 
 ```python
 from lazysammy import AutoMask, AutoMaskResult, FrameMasks, ImagePrediction, Mask, VideoResults
+```
+
+Masks support set operations and geometry directly:
+
+```python
+union = pred.masks[0] | pred.masks[1]   # Mask
+overlap = pred.masks[0] & pred.masks[1]  # Mask
+inverse = ~pred.best_mask                # Mask
+print(pred.best_mask.bbox)               # [x_min, y_min, x_max, y_max]
+print(pred.best_mask.centroid)           # (x, y)
+print(pred.masks[0].iou(pred.masks[1]))  # float
+```
+
+Every result type round-trips through JSON-friendly dicts (masks as COCO RLE):
+
+```python
+import json
+
+payload = json.dumps(pred.to_dict())
+restored = ImagePrediction.from_dict(json.loads(payload))
 ```
 
 ---
@@ -341,6 +393,9 @@ auto = sam.auto_segment(
     use_m2m=True,               # mask-to-mask refinement
 )
 ```
+
+> Tuned settings are cached per configuration, so repeated calls with the same
+> options reuse the loaded model instead of rebuilding it.
 
 ### Use sub-components directly
 
@@ -380,6 +435,41 @@ from lazysammy import (
     show_video_frame,
 )
 ```
+
+### Mask utilities
+
+```python
+from lazysammy import combine_masks, mask_iou, mask_to_bbox, mask_to_rle, rle_to_mask
+
+union = combine_masks(pred.numpy())     # (N, H, W) -> (H, W)
+box = mask_to_bbox(pred.best_mask.data) # [x_min, y_min, x_max, y_max]
+overlap = mask_iou(pred.masks[0].data, pred.masks[1].data)
+
+rle = mask_to_rle(pred.best_mask.data)  # COCO RLE dict
+mask = rle_to_mask(rle)                 # back to a boolean array
+```
+
+### Many prompts on one image
+
+Encoding an image is the expensive part. `set_image()` encodes once and
+`predict()` reuses the embedding, so iterative prompting does not re-run the
+image encoder:
+
+```python
+sam.set_image("photo.jpg")
+
+p1 = sam.predict(points=[[100, 200]], labels=[1])
+p2 = sam.predict(points=[[120, 180]], labels=[0])   # no re-encoding
+
+# Or segment several objects in one pass
+preds = sam.segment_multi_point(
+    "photo.jpg",
+    points_per_object=[[[100, 200]], [[400, 300], [410, 310]]],
+)
+```
+
+> `segment()` and `refine()` also reuse the cached embedding automatically when
+the same image is passed again.
 
 ### Interactive prompt picking (notebooks)
 
@@ -459,12 +549,18 @@ Then open <http://localhost:7860>. The demo has three tabs:
 - **Auto Segment:** segment everything, with area and IoU filters
 - **Video Tracking:** upload a clip, click prompts on frames, render an overlay
 
+<p align="center">
+  <img src="assets/demo.jpg" alt="lazysammy Gradio demo" width="760"/>
+  <br/>
+  <em>The bundled Gradio demo.</em>
+</p>
+
 ---
 
 ## Development
 
 ```bash
-uv sync --extra dev
+uv sync
 
 # Lint and format
 uv run ruff check src/ tests/ demo/ scripts/
@@ -493,6 +589,35 @@ uv run python scripts/build_notebook.py
 # Regenerate the README comparison figure from real model runs
 uv run python scripts/make_comparison.py
 ```
+
+---
+
+## Contributing
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) for
+the development setup, the checks that must pass before a pull request, and the
+project's design guidelines (keep the abstraction thin, validate at the
+boundary, add a regression test with every fix).
+
+For security issues, follow [SECURITY.md](SECURITY.md) instead of opening a
+public issue.
+
+---
+
+## Citation
+
+If you use `lazysammy` in academic work, please cite the underlying SAM 2 paper:
+
+```bibtex
+@article{ravi2024sam2,
+  title   = {SAM 2: Segment Anything in Images and Videos},
+  author  = {Ravi, Nikhila and Gabeur, Valentin and Hu, Yuan-Ting and others},
+  journal = {arXiv preprint arXiv:2408.00714},
+  year    = {2024}
+}
+```
+
+---
 
 ## License
 
