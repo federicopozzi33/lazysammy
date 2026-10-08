@@ -27,6 +27,8 @@ import numpy as np
 
 from lazysammy import (
     SAM2,
+    SAM3,
+    ConceptPrediction,
     ImagePrediction,
     draw_masks_on_image,
     extract_frames,
@@ -57,6 +59,9 @@ _NO_PROMPTS_HTML = (
 # ---------------------------------------------------------------------------
 
 _MODEL_CACHE: dict[str, SAM2] = {}
+# SAM 3 is a separate, optional model (open-vocabulary concepts). It is cached
+# under a single key because it has no size variants.
+_SAM3_CACHE: dict[str, SAM3] = {}
 # Guards model construction only, so loading multi-GB weights never happens
 # twice for the same size.
 _MODEL_LOAD_LOCK = threading.Lock()
@@ -80,6 +85,19 @@ def _get_model(model_size: str) -> SAM2:
             logger.info("Loading SAM2 model: %s", model_size)
             _MODEL_CACHE[model_size] = SAM2(model_size)
         return _MODEL_CACHE[model_size]
+
+
+def _get_sam3_model() -> SAM3:
+    """Return the cached :class:`SAM3` model, loading it on first use.
+
+    SAM 3 is an optional extra; if it is not installed the underlying import
+    raises ``ImportError``, which the handlers surface as a status message.
+    """
+    with _MODEL_LOAD_LOCK:
+        if "sam3" not in _SAM3_CACHE:
+            logger.info("Loading SAM3 model")
+            _SAM3_CACHE["sam3"] = SAM3()
+        return _SAM3_CACHE["sam3"]
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +257,30 @@ VideoPrompt = PointPrompt | BoxPrompt
 
 
 @dataclass
+class TextPrompt:
+    """A SAM 3 text concept prompt for a video frame.
+
+    Unlike point/box prompts, a text prompt is not tied to one object id: SAM 3
+    detects every matching instance and assigns each its own id.
+    """
+
+    frame_idx: int
+    text: str
+
+    def draw(self, img: np.ndarray, color: tuple[int, int, int]) -> None:
+        """Draw a label for the concept in the top-left corner."""
+        _draw_label(img, f'"{self.text}"', 10, 24, color, scale=0.6)
+
+    def apply(self, session: Any) -> None:
+        """Register this concept prompt on a SAM 3 video session."""
+        session.add_text(frame_idx=self.frame_idx, text=self.text)
+
+    def summary_html(self) -> str:
+        """Render the prompt body for the prompt-list summary."""
+        return f'Concept "{self.text}" | Frame {self.frame_idx}'
+
+
+@dataclass
 class ImagePrompts:
     """Accumulated image-tab prompts for a single object on frame 0.
 
@@ -389,7 +431,58 @@ def _auto_segment_image(
 
 
 # =========================================================================
-# Tab 3: Video Object Tracking
+# Tab 3: Concept Segmentation (SAM 3)
+# =========================================================================
+
+
+def _concept_segment_image(
+    image: np.ndarray | None,
+    text: str,
+    min_score: float,
+) -> tuple[np.ndarray | None, str]:
+    """Segment every instance of a text concept with SAM 3."""
+    if image is None:
+        return None, "Upload an image first."
+    if not text.strip():
+        return image, "Type a concept to segment (e.g. 'a player in white')."
+
+    try:
+        sam = _get_sam3_model()
+        with _INFERENCE_LOCK:
+            result = sam.segment_text(image, text.strip())
+    except ImportError:
+        return image, "SAM 3 is not installed. Run: uv sync --extra sam3"
+    except _DEMO_ERRORS as exc:
+        logger.exception("Concept segmentation failed")
+        return image, f"Error: Concept segmentation failed: {exc}"
+
+    if min_score > 0:
+        result = result.filter_by_score(float(min_score))
+    if not result.masks:
+        return image, f"No instances of {text.strip()!r} found."
+
+    overlay = draw_masks_on_image(image, result.numpy(), alpha=0.4)
+    overlay = _draw_concept_boxes(overlay, result)
+    info = f"Found {len(result.masks)} instance(s) of {text.strip()!r}"
+    return overlay, info
+
+
+def _draw_concept_boxes(
+    image: np.ndarray,
+    prediction: ConceptPrediction,
+) -> np.ndarray:
+    """Draw each detected instance's bounding box and score."""
+    out = image.copy()
+    for i, (mask, box) in enumerate(zip(prediction.masks, prediction.boxes, strict=False)):
+        color = _color_for_obj(i)
+        x1, y1, x2, y2 = (int(v) for v in box)
+        cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+        _draw_label(out, f"{mask.score:.2f}", x1 + 4, y1 - 6, color, scale=0.5)
+    return out
+
+
+# =========================================================================
+# Tab 4: Video Object Tracking
 # =========================================================================
 
 
@@ -492,7 +585,11 @@ def _draw_video_prompts(
     out = frame.copy()
     for prompt in prompts:
         if prompt.frame_idx == frame_idx:
-            prompt.draw(out, _color_for_obj(prompt.obj_id))
+            if isinstance(prompt, (PointPrompt, BoxPrompt)):
+                color = _color_for_obj(prompt.obj_id)
+            else:
+                color = (255, 255, 255)
+            prompt.draw(out, color)
     return out
 
 
@@ -501,24 +598,32 @@ def _format_prompts_html(prompts: list[VideoPrompt]) -> str:
     if not prompts:
         return _NO_PROMPTS_HTML
 
-    obj_ids = sorted({p.obj_id for p in prompts})
+    obj_ids = sorted({p.obj_id for p in prompts if isinstance(p, (PointPrompt, BoxPrompt))})
     frames_used = sorted({p.frame_idx for p in prompts})
     n_points = sum(len(p.points) for p in prompts if isinstance(p, PointPrompt))
     n_boxes = sum(1 for p in prompts if isinstance(p, BoxPrompt))
+    n_text = sum(1 for p in prompts if isinstance(p, TextPrompt))
 
     header = (
         f"<b>{len(obj_ids)} object(s)</b> | "
-        f"{n_points} point(s) | {n_boxes} box(es) | "
+        f"{n_points} point(s) | {n_boxes} box(es) | {n_text} concept(s) | "
         f"on frame(s) {', '.join(str(f) for f in frames_used)}"
     )
 
     rows = []
     for p in prompts:
-        color = "#{:02x}{:02x}{:02x}".format(*_color_for_obj(p.obj_id))
-        badge = (
-            f'<span style="display:inline-block;width:10px;height:10px;'
-            f'border-radius:50%;background:{color};margin-right:4px"></span>'
-        )
+        if isinstance(p, TextPrompt):
+            badge = (
+                '<span style="display:inline-block;width:10px;height:10px;'
+                "border-radius:50%;background:#ffffff;border:1px solid #94a3b8;"
+                'margin-right:4px"></span>'
+            )
+        else:
+            color = "#{:02x}{:02x}{:02x}".format(*_color_for_obj(p.obj_id))
+            badge = (
+                f'<span style="display:inline-block;width:10px;height:10px;'
+                f'border-radius:50%;background:{color};margin-right:4px"></span>'
+            )
         rows.append(f"{badge}{p.summary_html()}")
 
     body = "<br>".join(rows)
@@ -533,7 +638,12 @@ def _track_and_render(
     alpha: float,
     bidirectional: bool,
 ) -> tuple[str | None, str]:
-    """Build a tracking session from the accumulated prompts and render an MP4."""
+    """Build a tracking session from the accumulated prompts and render an MP4.
+
+    Point/box prompts use SAM 2. If any text concept prompt is present, SAM 3
+    is used instead (it also supports points and boxes, so a mixed prompt set
+    still works).
+    """
     if not frames_dir_str:
         return None, "Extract frames first."
     if not prompts_state:
@@ -543,20 +653,26 @@ def _track_and_render(
     if not frames_dir.is_dir():
         return None, f"Frame directory is gone: {frames_dir}"
 
+    uses_concepts = any(isinstance(p, TextPrompt) for p in prompts_state)
     try:
-        sam = _get_model(model_size)
         with _INFERENCE_LOCK:
-            session = sam.video(frames_dir, offload_video_to_cpu=True)
-
-            for prompt in prompts_state:
-                prompt.apply(session)
-
-            if bidirectional:
-                results = session.propagate_bidirectional()
-                direction = "bidirectional"
+            if uses_concepts:
+                sam3 = _get_sam3_model()
+                session = sam3.video(frames_dir, offload_video_to_cpu=True)
+                for prompt in prompts_state:
+                    prompt.apply(session)
+                results = session.propagate(direction="both" if bidirectional else "forward")
+                session.close()
             else:
-                results = session.propagate()
-                direction = "forward"
+                sam = _get_model(model_size)
+                session = sam.video(frames_dir, offload_video_to_cpu=True)
+                for prompt in prompts_state:
+                    prompt.apply(session)
+                if bidirectional:
+                    results = session.propagate_bidirectional()
+                else:
+                    results = session.propagate()
+            direction = "bidirectional" if bidirectional else "forward"
 
             # Gradio needs a concrete file. Write into the shared output dir
             # with a unique name so concurrent tracks do not collide.
@@ -570,11 +686,17 @@ def _track_and_render(
                 show_ids=True,
                 show_frame_number=True,
             )
+    except ImportError:
+        return None, "SAM 3 is not installed. Run: uv sync --extra sam3"
     except _DEMO_ERRORS as exc:
         logger.exception("Tracking failed")
         return None, f"Error: Tracking failed: {exc}"
 
-    info = f"Tracked {len(results.object_ids)} object(s) across {len(results)} frames ({direction})"
+    backend = "SAM 3" if uses_concepts else "SAM 2"
+    info = (
+        f"{backend}: tracked {len(results.object_ids)} object(s) "
+        f"across {len(results)} frames ({direction})"
+    )
     return str(out_path), info
 
 
@@ -889,7 +1011,7 @@ def _vid_undo(
     frame_slider_val: int,
     mode: str,
 ) -> tuple[np.ndarray | None, list[VideoPrompt], list[Any], str]:
-    """Undo the most recent video-tab prompt (point or box corner)."""
+    """Undo the most recent video-tab prompt (point, box corner, or concept)."""
     frame_idx = int(frame_slider_val)
     if _is_box_mode(mode) and vid_box:
         vid_box = vid_box[:-1]
@@ -902,6 +1024,26 @@ def _vid_undo(
             ]
         else:
             prompts = prompts[:-1]
+    display = _format_prompts_html(prompts)
+    annotated = _render_frame(clean_frame, prompts, vid_box, frame_idx)
+    return annotated, prompts, vid_box, display
+
+
+def _add_text_prompt(
+    clean_frame: np.ndarray | None,
+    prompts: list[VideoPrompt],
+    vid_box: list[Any],
+    frame_slider_val: int,
+    text: str,
+) -> tuple[np.ndarray | None, list[VideoPrompt], list[Any], str]:
+    """Add a SAM 3 text concept prompt for the current frame."""
+    if clean_frame is None:
+        return None, prompts, vid_box, _format_prompts_html(prompts)
+    if not text.strip():
+        return clean_frame, prompts, vid_box, _format_prompts_html(prompts)
+
+    frame_idx = int(frame_slider_val)
+    prompts = [*prompts, TextPrompt(frame_idx, text.strip())]
     display = _format_prompts_html(prompts)
     annotated = _render_frame(clean_frame, prompts, vid_box, frame_idx)
     return annotated, prompts, vid_box, display
@@ -1066,6 +1208,46 @@ def _build_auto_tab(model_size: gr.Dropdown) -> None:
         )
 
 
+def _build_concept_tab() -> None:
+    """Build the SAM 3 Concept Segmentation tab and wire its events."""
+    with gr.Tab("Concept Segment (SAM 3)"):
+        gr.Markdown(
+            "Describe what you want in words and SAM 3 segments **every** "
+            "matching instance. Requires the optional extra: "
+            "`uv sync --extra sam3`."
+        )
+        with gr.Row():
+            with gr.Column(scale=1):
+                concept_img_input = gr.Image(
+                    label="Input Image",
+                    type="numpy",
+                    height=480,
+                )
+                concept_text = gr.Textbox(
+                    label="Concept",
+                    placeholder="e.g. a player in white",
+                    info="A short noun phrase. SAM 3 finds all matching instances.",
+                )
+                concept_min_score = gr.Slider(
+                    minimum=0.0,
+                    maximum=1.0,
+                    step=0.05,
+                    value=0.5,
+                    label="Min score",
+                )
+                concept_btn = gr.Button("Segment Concept", variant="primary")
+
+            with gr.Column(scale=1):
+                concept_img_output = gr.Image(label="Instances", height=480)
+                concept_info = gr.Textbox(label="Info", interactive=False)
+
+        concept_btn.click(
+            fn=_concept_segment_image,
+            inputs=[concept_img_input, concept_text, concept_min_score],
+            outputs=[concept_img_output, concept_info],
+        )
+
+
 def _build_video_tab(model_size: gr.Dropdown) -> None:
     """Build the Video Tracking tab and wire its events."""
     with gr.Tab("Video Tracking"):
@@ -1141,6 +1323,16 @@ def _build_video_tab(model_size: gr.Dropdown) -> None:
                             label="Click Mode",
                         )
                     vid_click_instruction = gr.HTML(_render_mode_instruction(MODE_FOREGROUND))
+
+                    # SAM 3 concept prompt: describe an object in words.
+                    with gr.Row():
+                        vid_text_prompt = gr.Textbox(
+                            label="Concept (SAM 3)",
+                            placeholder="e.g. person",
+                            info="Adds a text prompt; tracking then uses SAM 3.",
+                            scale=3,
+                        )
+                        vid_text_btn = gr.Button("Add Concept", size="sm", scale=1)
 
                 # Right column: prompt list + actions
                 with gr.Column(scale=1):
@@ -1291,6 +1483,23 @@ def _build_video_tab(model_size: gr.Dropdown) -> None:
             ],
         )
 
+        vid_text_btn.click(
+            fn=_add_text_prompt,
+            inputs=[
+                clean_frame_state,
+                video_prompts_state,
+                vid_box_state,
+                frame_slider,
+                vid_text_prompt,
+            ],
+            outputs=[
+                frame_preview,
+                video_prompts_state,
+                vid_box_state,
+                vid_prompts_display,
+            ],
+        )
+
         track_btn.click(
             fn=_track_and_render,
             inputs=[
@@ -1319,10 +1528,12 @@ def build_app() -> gr.Blocks:
         gr.Markdown(
             "# lazysammy Demo\n"
             "Interactive segmentation & video tracking powered by "
-            "[SAM 2](https://github.com/facebookresearch/sam2) through "
+            "[SAM 2](https://github.com/facebookresearch/sam2) and "
+            "[SAM 3](https://github.com/facebookresearch/sam3) through "
             "[lazysammy](https://github.com/federicopozzi33/easier-sam2).\n\n"
             "**Tip:** start with `tiny` or `small` for fast iteration, then "
-            "switch to `large` for best quality."
+            "switch to `large` for best quality. The Concept tab needs the "
+            "optional `sam3` extra."
         )
 
         model_size = gr.Dropdown(
@@ -1334,6 +1545,7 @@ def build_app() -> gr.Blocks:
 
         _build_image_tab(model_size)
         _build_auto_tab(model_size)
+        _build_concept_tab()
         _build_video_tab(model_size)
 
     return app

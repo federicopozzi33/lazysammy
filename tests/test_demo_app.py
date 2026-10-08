@@ -454,3 +454,152 @@ def test_thread_safety_locks_exist(app_module: Any) -> None:
     lock_type = type(threading.Lock())
     assert isinstance(app_module._MODEL_LOAD_LOCK, lock_type)
     assert isinstance(app_module._INFERENCE_LOCK, lock_type)
+
+
+# ---------------------------------------------------------------------------
+# SAM 3 concept segmentation and text prompts
+# ---------------------------------------------------------------------------
+
+
+class _StubConceptPrediction:
+    """Minimal stand-in for `lazysammy.types.ConceptPrediction`."""
+
+    def __init__(self, masks: list[_StubMask], boxes: list[list[float]]) -> None:
+        self.masks = masks
+        self.boxes = boxes
+
+    def filter_by_score(self, min_score: float) -> _StubConceptPrediction:
+        kept = [
+            (m, b) for m, b in zip(self.masks, self.boxes, strict=False) if m.score >= min_score
+        ]
+        return _StubConceptPrediction([m for m, _ in kept], [b for _, b in kept])
+
+    def numpy(self) -> np.ndarray:
+        return np.stack([m.numpy() for m in self.masks])
+
+
+class _StubSAM3:
+    """Records calls and returns deterministic concept detections."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def segment_text(self, image: np.ndarray, text: str, **kwargs: Any) -> _StubConceptPrediction:
+        self.calls.append(("segment_text", {"text": text, **kwargs}))
+        shape = image.shape[:2]
+        masks = [_StubMask(np.ones(shape, dtype=bool), score=0.9)]
+        return _StubConceptPrediction(masks, [[10.0, 10.0, 40.0, 40.0]])
+
+
+@pytest.fixture
+def stub_sam3(app_module: Any, monkeypatch: pytest.MonkeyPatch) -> _StubSAM3:
+    """Replace the demo's SAM 3 loader with a stub."""
+    stub = _StubSAM3()
+    monkeypatch.setattr(app_module, "_get_sam3_model", lambda: stub)
+    return stub
+
+
+def test_concept_segment_reports_instance_count(
+    app_module: Any, stub_sam3: _StubSAM3, sample_rgb: np.ndarray
+) -> None:
+    overlay, info = app_module._concept_segment_image(sample_rgb, "a player in white", 0.0)
+    assert overlay is not None
+    assert "1 instance(s)" in info
+    assert stub_sam3.calls[0][0] == "segment_text"
+    assert stub_sam3.calls[0][1]["text"] == "a player in white"
+
+
+def test_concept_segment_requires_text(app_module: Any, sample_rgb: np.ndarray) -> None:
+    _, info = app_module._concept_segment_image(sample_rgb, "   ", 0.0)
+    assert "Type a concept" in info
+
+
+def test_concept_segment_requires_image(app_module: Any) -> None:
+    overlay, info = app_module._concept_segment_image(None, "cat", 0.0)
+    assert overlay is None
+    assert "Upload an image" in info
+
+
+def test_concept_segment_reports_missing_sam3(
+    app_module: Any, monkeypatch: pytest.MonkeyPatch, sample_rgb: np.ndarray
+) -> None:
+    def _raise() -> Any:
+        raise ImportError("no sam3")
+
+    monkeypatch.setattr(app_module, "_get_sam3_model", _raise)
+    _, info = app_module._concept_segment_image(sample_rgb, "cat", 0.0)
+    assert "SAM 3 is not installed" in info
+
+
+def test_add_text_prompt_appends_concept(app_module: Any, sample_rgb: np.ndarray) -> None:
+    _, prompts, _, display = app_module._add_text_prompt(sample_rgb, [], [], 0, "person")
+    assert len(prompts) == 1
+    assert isinstance(prompts[0], app_module.TextPrompt)
+    assert prompts[0].text == "person"
+    assert "person" in display
+
+
+def test_add_text_prompt_ignores_blank(app_module: Any, sample_rgb: np.ndarray) -> None:
+    _, prompts, _, _ = app_module._add_text_prompt(sample_rgb, [], [], 0, "  ")
+    assert prompts == []
+
+
+def test_text_prompt_summary_and_draw(app_module: Any, sample_rgb: np.ndarray) -> None:
+    prompt = app_module.TextPrompt(0, "person")
+    assert "person" in prompt.summary_html()
+    drawn = sample_rgb.copy()
+    prompt.draw(drawn, (255, 255, 255))
+    assert bool((drawn != sample_rgb).any())
+
+
+def test_video_prompts_html_counts_concepts(app_module: Any) -> None:
+    prompts = [app_module.TextPrompt(0, "person"), app_module.PointPrompt(0, 1, [[1, 1]], [1])]
+    html = app_module._format_prompts_html(prompts)
+    assert "1 concept(s)" in html
+    assert "1 point(s)" in html
+
+
+def test_track_uses_sam3_when_text_prompt_present(
+    app_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A text prompt routes tracking to SAM 3 instead of SAM 2."""
+    calls: dict[str, Any] = {}
+
+    class _StubSession:
+        def add_text(self, frame_idx: int, text: str) -> None:
+            calls["text"] = text
+
+        def propagate(self, direction: str = "both") -> Any:
+            calls["direction"] = direction
+            return _StubVideoResults()
+
+        def close(self) -> None:
+            calls["closed"] = True
+
+    class _StubSAM3Video:
+        def video(self, frames_dir: Any, **kwargs: Any) -> _StubSession:
+            calls["video"] = frames_dir
+            return _StubSession()
+
+    monkeypatch.setattr(app_module, "_get_sam3_model", lambda: _StubSAM3Video())
+    monkeypatch.setattr(app_module, "save_video_overlay_mp4", lambda *a, **k: None)
+
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    prompts = [app_module.TextPrompt(0, "person")]
+    out, info = app_module._track_and_render(str(frames_dir), prompts, "small", 24.0, 0.5, False)
+
+    assert out is not None
+    assert "SAM 3" in info
+    assert calls["text"] == "person"
+    assert calls["closed"] is True
+
+
+class _StubVideoResults:
+    """Minimal VideoResults stand-in for the tracking test."""
+
+    def __init__(self) -> None:
+        self.object_ids = {1, 2}
+
+    def __len__(self) -> int:
+        return 3
