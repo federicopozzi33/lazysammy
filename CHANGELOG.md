@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SAM 3 integration** (optional, `pip install lazysammy[sam3]`). A new
+  `SAM3` facade mirrors the `SAM2` interface for geometric prompts while
+  exposing SAM 3's open-vocabulary concept features:
+  - `SAM3.segment_text(image, "a player in white")` detects and segments
+    *every* instance of a text concept in an image.
+  - `SAM3.segment_exemplar(image, box)` finds all instances matching a box
+    exemplar.
+  - `SAM3.video(...)` returns a `SAM3VideoSession` whose `add_text()` prompt
+    tracks every instance of a concept through a video, assigning each a
+    unique object id.
+  - `ConceptSegmenter` and `SAM3VideoTracker` are the underlying components;
+    `ConceptPrediction` is the new result type (masks + boxes + concept).
+  - `ModelFamily` enum distinguishes SAM 2 from SAM 3.
+  - `save_concept_prediction()` writes concept masks to disk.
 - `scripts/build_notebook.py`, which generates `examples/video_tracking.ipynb`
   from reviewable Python source so the notebook stays reproducible and diffable.
 - `scripts/make_comparison.py`, which derives the README's side-by-side figure

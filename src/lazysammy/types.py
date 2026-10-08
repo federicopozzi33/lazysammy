@@ -24,12 +24,25 @@ class ModelSize(str, Enum):
     LARGE = "large"
 
 
+class ModelFamily(str, Enum):
+    """Which SAM generation a wrapper targets.
+
+    SAM 2 is promptable with points, boxes, and masks. SAM 3 adds
+    open-vocabulary *concept* prompts (text or image exemplars) and can
+    exhaustively segment every instance of a concept.
+    """
+
+    SAM2 = "sam2"
+    SAM3 = "sam3"
+
+
 class PromptType(str, Enum):
     """Types of prompts that can be used for segmentation."""
 
     POINT = "point"
     BOX = "box"
     MASK = "mask"
+    TEXT = "text"
 
 
 # ---------------------------------------------------------------------------
@@ -649,4 +662,99 @@ class VideoResults:
             frames=[FrameMasks.from_dict(entry) for entry in data.get("frames", [])],
             video_dir=Path(video_dir) if video_dir else None,
             num_frames=int(data.get("num_frames", 0)),
+        )
+
+
+# ---------------------------------------------------------------------------
+# SAM 3 concept segmentation
+# ---------------------------------------------------------------------------
+
+# HuggingFace repo hosting the SAM 3 checkpoints. Access must be requested on
+# the Hub before the weights can be downloaded.
+SAM3_HF_REPO = "facebook/sam3"
+# SAM 3.1 (Object Multiplex) checkpoints.
+SAM3_1_HF_REPO = "facebook/sam3.1"
+
+
+@dataclass
+class ConceptPrediction:
+    """Result of a SAM 3 open-vocabulary concept segmentation.
+
+    SAM 3 detects and segments *every* instance of a concept described by a
+    short text phrase (or image exemplars), so a single prediction can contain
+    many objects. Each object carries its own mask, score, and bounding box.
+
+    Attributes:
+        masks: One :class:`Mask` per detected instance.
+        boxes: Bounding boxes as ``[x1, y1, x2, y2]``, aligned with *masks*.
+        concept: The text phrase (or ``"visual"`` for exemplar prompts) that
+            produced these instances.
+        image_shape: ``(H, W)`` of the source image (optional).
+    """
+
+    masks: list[Mask]
+    boxes: list[list[float]] = field(default_factory=list)
+    concept: str | None = None
+    image_shape: tuple[int, int] | None = None
+
+    def __len__(self) -> int:
+        return len(self.masks)
+
+    def __iter__(self) -> Iterator[Mask]:
+        """Iterate over the detected instance masks."""
+        return iter(self.masks)
+
+    def __getitem__(self, index: int) -> Mask:
+        """Return the instance mask at *index*."""
+        return self.masks[index]
+
+    @property
+    def best_mask(self) -> Mask:
+        """Return the highest-scoring instance mask.
+
+        Raises:
+            ValueError: If the prediction contains no masks.
+        """
+        validate_nonempty_masks(len(self.masks), context="ConceptPrediction")
+        return max(self.masks, key=lambda m: m.score)
+
+    def numpy(self) -> npt.NDArray[np.bool_]:
+        """Stack all instance masks into a ``(N, H, W)`` boolean array."""
+        if not self.masks:
+            shape = self.image_shape or (0, 0)
+            return np.zeros((0, *shape), dtype=bool)
+        return np.stack([m.data for m in self.masks])
+
+    def filter_by_score(self, min_score: float) -> ConceptPrediction:
+        """Return a new prediction keeping only instances above *min_score*."""
+        kept = [
+            (mask, box)
+            for mask, box in zip(self.masks, self.boxes, strict=False)
+            if mask.score >= min_score
+        ]
+        return ConceptPrediction(
+            masks=[mask for mask, _ in kept],
+            boxes=[box for _, box in kept],
+            concept=self.concept,
+            image_shape=self.image_shape,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a JSON-friendly dict (masks as COCO RLE)."""
+        return {
+            "concept": self.concept,
+            "image_shape": list(self.image_shape) if self.image_shape else None,
+            "boxes": [list(box) for box in self.boxes],
+            "masks": [m.to_dict() for m in self.masks],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ConceptPrediction:
+        """Reconstruct a :class:`ConceptPrediction` from :meth:`to_dict` output."""
+        shape = data.get("image_shape")
+        return cls(
+            masks=[Mask.from_dict(entry) for entry in data.get("masks", [])],
+            boxes=[list(box) for box in data.get("boxes", [])],
+            concept=data.get("concept"),
+            image_shape=tuple(shape) if shape else None,
         )
