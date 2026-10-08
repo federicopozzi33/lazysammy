@@ -399,6 +399,28 @@ def _segment_with_box(
 # =========================================================================
 
 
+def _render_segmentation(
+    image: np.ndarray,
+    result: Any,
+    *,
+    alpha: float,
+    empty_message: str,
+    info: str,
+    annotate: Callable[[np.ndarray], np.ndarray] | None = None,
+) -> tuple[np.ndarray, str]:
+    """Draw a mask result and format its info line, or report an empty result.
+
+    Shared tail of the auto-segment and concept-segment handlers so the
+    overlay/info formatting lives in one place.
+    """
+    if not result.masks:
+        return image, empty_message
+    overlay = draw_masks_on_image(image, result.numpy(), alpha=alpha)
+    if annotate is not None:
+        overlay = annotate(overlay)
+    return overlay, info
+
+
 def _auto_segment_image(
     image: np.ndarray | None,
     model_size: str,
@@ -421,13 +443,13 @@ def _auto_segment_image(
     if min_iou > 0:
         result = result.filter_by_iou(min_iou=float(min_iou))
 
-    if not result.masks:
-        return image, "No masks found with the current filters."
-
-    all_masks = result.numpy()
-    overlay = draw_masks_on_image(image, all_masks, alpha=0.4)
-    info = f"Found {len(result.masks)} masks"
-    return overlay, info
+    return _render_segmentation(
+        image,
+        result,
+        alpha=0.4,
+        empty_message="No masks found with the current filters.",
+        info=f"Found {len(result.masks)} masks",
+    )
 
 
 # =========================================================================
@@ -458,13 +480,15 @@ def _concept_segment_image(
 
     if min_score > 0:
         result = result.filter_by_score(float(min_score))
-    if not result.masks:
-        return image, f"No instances of {text.strip()!r} found."
 
-    overlay = draw_masks_on_image(image, result.numpy(), alpha=0.4)
-    overlay = _draw_concept_boxes(overlay, result)
-    info = f"Found {len(result.masks)} instance(s) of {text.strip()!r}"
-    return overlay, info
+    return _render_segmentation(
+        image,
+        result,
+        alpha=0.4,
+        empty_message=f"No instances of {text.strip()!r} found.",
+        info=f"Found {len(result.masks)} instance(s) of {text.strip()!r}",
+        annotate=lambda overlay: _draw_concept_boxes(overlay, result),
+    )
 
 
 def _draw_concept_boxes(
@@ -657,21 +681,18 @@ def _track_and_render(
     try:
         with _INFERENCE_LOCK:
             if uses_concepts:
-                sam3 = _get_sam3_model()
-                session = sam3.video(frames_dir, offload_video_to_cpu=True)
-                for prompt in prompts_state:
-                    prompt.apply(session)
+                session = _get_sam3_model().video(frames_dir, offload_video_to_cpu=True)
+            else:
+                session = _get_model(model_size).video(frames_dir, offload_video_to_cpu=True)
+            for prompt in prompts_state:
+                prompt.apply(session)
+            if uses_concepts:
                 results = session.propagate(direction="both" if bidirectional else "forward")
                 session.close()
+            elif bidirectional:
+                results = session.propagate_bidirectional()
             else:
-                sam = _get_model(model_size)
-                session = sam.video(frames_dir, offload_video_to_cpu=True)
-                for prompt in prompts_state:
-                    prompt.apply(session)
-                if bidirectional:
-                    results = session.propagate_bidirectional()
-                else:
-                    results = session.propagate()
+                results = session.propagate()
             direction = "bidirectional" if bidirectional else "forward"
 
             # Gradio needs a concrete file. Write into the shared output dir

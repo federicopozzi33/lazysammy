@@ -125,6 +125,55 @@ def load_image(source: str | Path | npt.NDArray[np.uint8]) -> npt.NDArray[np.uin
     return np.ascontiguousarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), dtype=np.uint8)
 
 
+class ImageEmbeddingCache:
+    """Track which image a segmenter has already encoded.
+
+    Image encoders are expensive, so segmenters encode an image once and reuse
+    the embedding for repeated prompts. This helper owns the cache key and the
+    cached shape so the contract lives in one place instead of being copied
+    into every segmenter.
+
+    Arrays are keyed by identity (``id``) plus shape/dtype; the cache holds a
+    reference to the cached array so its id cannot be recycled while cached.
+    Mutating an array in place is *not* detected: pass a new array to
+    invalidate the cache. Files are keyed by resolved path plus mtime and size.
+    """
+
+    def __init__(self) -> None:
+        self._key: Any = None
+        self._shape: tuple[int, int] | None = None
+        # Keep a reference to a cached array so its ``id`` cannot be recycled
+        # by the allocator while the cache still points at it.
+        self._ref: npt.NDArray[np.uint8] | None = None
+
+    @staticmethod
+    def key(image: str | Path | npt.NDArray[np.uint8]) -> Any:
+        """Build a cache key identifying *image* without hashing its pixels."""
+        if isinstance(image, np.ndarray):
+            return ("array", image.shape, image.dtype.str, id(image))
+        p = Path(image)
+        try:
+            stat = p.stat()
+        except OSError:
+            return ("path", str(p), None, None)
+        return ("path", str(p.resolve()), stat.st_mtime_ns, stat.st_size)
+
+    @property
+    def shape(self) -> tuple[int, int] | None:
+        """The cached image shape, or ``None`` if nothing is cached."""
+        return self._shape
+
+    def matches(self, image: str | Path | npt.NDArray[np.uint8]) -> bool:
+        """Return ``True`` if *image* is the currently cached image."""
+        return self._shape is not None and self.key(image) == self._key
+
+    def store(self, image: str | Path | npt.NDArray[np.uint8], shape: tuple[int, int]) -> None:
+        """Record *image* and its encoded *shape* as the cached entry."""
+        self._key = self.key(image)
+        self._shape = shape
+        self._ref = image if isinstance(image, np.ndarray) else None
+
+
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
 _VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v"}
 

@@ -18,6 +18,7 @@ from lazysammy.concept import ConceptSegmenter
 from lazysammy.sam3 import SAM3
 from lazysammy.sam3_video import SAM3VideoSession, SAM3VideoTracker
 from lazysammy.types import ConceptPrediction, Mask
+from lazysammy.utils import load_image
 
 # ---------------------------------------------------------------------------
 # Stubs
@@ -46,7 +47,9 @@ class _StubProcessor:
         self.calls.append(("add_geometric_prompt", {"box": box, "label": label}))
         return self._with_detections(state, concept="visual")
 
-    def set_confidence_threshold(self, threshold: float, state: dict[str, Any]) -> None:
+    def set_confidence_threshold(
+        self, threshold: float, state: dict[str, Any] | None = None
+    ) -> None:
         self.calls.append(("set_confidence_threshold", threshold))
         self.confidence_threshold = threshold
 
@@ -145,6 +148,20 @@ class TestConceptPrediction:
         assert len(filtered) == 1
         assert filtered.boxes == [[1, 1, 2, 2]]
         assert filtered.concept == "cat"
+
+    def test_filter_by_score_without_boxes_keeps_masks(self) -> None:
+        """Regression: zipping masks against empty boxes dropped every mask."""
+        pred = ConceptPrediction(
+            masks=[
+                Mask(data=np.ones((4, 4), dtype=bool), score=0.5),
+                Mask(data=np.zeros((4, 4), dtype=bool), score=0.9),
+            ],
+            concept="cat",
+        )
+        filtered = pred.filter_by_score(0.7)
+        assert len(filtered) == 1
+        assert filtered.masks[0].score == 0.9
+        assert filtered.boxes == []
 
     def test_dict_round_trip(self) -> None:
         pred = ConceptPrediction(
@@ -408,6 +425,23 @@ class TestSAM3VideoSession:
         session.add_box(frame_idx=0, obj_id=1, box=[0, 0, 4, 4])
         request = predictor.requests[0]
         np.testing.assert_allclose(request["bounding_boxes"], [[0.0, 0.0, 0.5, 0.5]])
+
+    def test_frame_shape_is_read_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: every prompt re-read the first frame from disk."""
+        session, _ = _session(tmp_path)
+        calls = {"n": 0}
+        real_load = load_image
+
+        def _counting_load(source: Any) -> Any:
+            calls["n"] += 1
+            return real_load(source)
+
+        monkeypatch.setattr("lazysammy.sam3_video.load_image", _counting_load)
+        session.add_points(frame_idx=0, obj_id=1, points=[[4, 4]], labels=[1])
+        session.add_box(frame_idx=0, obj_id=1, box=[0, 0, 4, 4])
+        assert calls["n"] == 1
 
     def test_propagate_collects_frames(self, tmp_path: Path) -> None:
         session, predictor = _session(tmp_path)

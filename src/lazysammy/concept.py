@@ -28,7 +28,7 @@ from lazysammy.types import (
     PointCoords,
     PointLabels,
 )
-from lazysammy.utils import auto_detect_device, autocast, load_image
+from lazysammy.utils import ImageEmbeddingCache, auto_detect_device, autocast, load_image
 from lazysammy.validation import (
     normalize_box,
     validate_box,
@@ -85,9 +85,7 @@ class ConceptSegmenter:
         )
         self._processor = self._make_processor(confidence_threshold)
         self._state: dict[str, Any] | None = None
-        self._cached_image_key: Any = None
-        self._cached_image_shape: tuple[int, int] | None = None
-        self._cached_image_ref: npt.NDArray[np.uint8] | None = None
+        self._image_cache = ImageEmbeddingCache()
 
     def _make_processor(self, confidence_threshold: float) -> Any:
         from sam3.model.sam3_image_processor import Sam3Processor
@@ -121,24 +119,6 @@ class ConceptSegmenter:
     # Image encoding (set once, prompt many)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _image_key(image: str | Path | npt.NDArray[np.uint8]) -> Any:
-        """Build a cache key identifying *image* without hashing its pixels.
-
-        Arrays are keyed by identity (``id``) plus shape/dtype; the segmenter
-        holds a reference to the cached array so its id cannot be recycled.
-        Mutating an array in place is not detected: pass a new array to
-        invalidate the cache.
-        """
-        if isinstance(image, np.ndarray):
-            return ("array", image.shape, image.dtype.str, id(image))
-        p = Path(image)
-        try:
-            stat = p.stat()
-        except OSError:
-            return ("path", str(p), None, None)
-        return ("path", str(p.resolve()), stat.st_mtime_ns, stat.st_size)
-
     def set_image(self, image: str | Path | npt.NDArray[np.uint8]) -> tuple[int, int]:
         """Encode an image once so repeated prompts reuse the embedding.
 
@@ -151,16 +131,15 @@ class ConceptSegmenter:
         img = load_image(image)
         with torch.inference_mode(), autocast(self._device):
             self._state = self._processor.set_image(img)
-        self._cached_image_key = self._image_key(image)
-        self._cached_image_shape = img.shape[:2]
-        self._cached_image_ref = image if isinstance(image, np.ndarray) else None
+        self._image_cache.store(image, img.shape[:2])
         return img.shape[:2]
 
     def _ensure_image(self, image: str | Path | npt.NDArray[np.uint8]) -> tuple[int, int]:
         """Encode *image* unless the same image is already cached."""
-        key = self._image_key(image)
-        if key == self._cached_image_key and self._cached_image_shape is not None:
-            return self._cached_image_shape
+        if self._image_cache.matches(image):
+            shape = self._image_cache.shape
+            assert shape is not None
+            return shape
         return self.set_image(image)
 
     def reset(self) -> None:
@@ -191,7 +170,10 @@ class ConceptSegmenter:
         """
         image_shape = self._ensure_image(image)
         if confidence_threshold is not None:
-            self._processor.set_confidence_threshold(confidence_threshold, self._state)
+            # Set the threshold without a state so the processor does not
+            # re-run grounding on the previous results; the text prompt below
+            # runs grounding once with the new threshold.
+            self._processor.set_confidence_threshold(confidence_threshold)
         with torch.inference_mode(), autocast(self._device):
             state = self._processor.set_text_prompt(state=self._state, prompt=text)
         return self._to_prediction(state, concept=text, image_shape=image_shape)
@@ -220,7 +202,10 @@ class ConceptSegmenter:
         """
         image_shape = self._ensure_image(image)
         if confidence_threshold is not None:
-            self._processor.set_confidence_threshold(confidence_threshold, self._state)
+            # Set the threshold without a state so the processor does not
+            # re-run grounding on the previous results; the geometric prompt
+            # below runs grounding once with the new threshold.
+            self._processor.set_confidence_threshold(confidence_threshold)
         cxcywh = self._to_normalized_cxcywh(box, image_shape)
         with torch.inference_mode(), autocast(self._device):
             state = self._processor.add_geometric_prompt(box=cxcywh, label=label, state=self._state)
@@ -307,7 +292,7 @@ class ConceptSegmenter:
         Raises:
             RuntimeError: If no image has been set with :meth:`set_image`.
         """
-        if self._cached_image_shape is None:
+        if self._image_cache.shape is None:
             msg = "No image is set. Call set_image(image) before predict()."
             raise RuntimeError(msg)
         validate_segment_prompts(
@@ -317,7 +302,7 @@ class ConceptSegmenter:
             mask_input=mask_input,
         )
         return self._predict_inst(
-            image_shape=self._cached_image_shape,
+            image_shape=self._image_cache.shape,
             points=points,
             labels=labels,
             box=box,
