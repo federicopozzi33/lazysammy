@@ -15,9 +15,11 @@ import logging
 import os
 import tempfile
 import threading
-from dataclasses import dataclass, replace
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
+from uuid import uuid4
 
 import cv2
 import gradio as gr
@@ -25,6 +27,7 @@ import numpy as np
 
 from lazysammy import (
     SAM2,
+    ImagePrediction,
     draw_masks_on_image,
     extract_frames,
     load_image,
@@ -54,12 +57,25 @@ _NO_PROMPTS_HTML = (
 # ---------------------------------------------------------------------------
 
 _MODEL_CACHE: dict[str, SAM2] = {}
-_MODEL_LOCK = threading.Lock()
+# Guards model construction only, so loading multi-GB weights never happens
+# twice for the same size.
+_MODEL_LOAD_LOCK = threading.Lock()
+# SAM 2 predictors are not thread-safe, so every inference call is serialised.
+# This lock is intentionally coarse: it also covers video propagation and MP4
+# encoding, which keeps concurrent Gradio requests from corrupting shared state.
+_INFERENCE_LOCK = threading.Lock()
+
+# Errors the demo surfaces as a status message instead of crashing the request.
+_DEMO_ERRORS = (ValueError, RuntimeError, IndexError, OSError)
+
+# Output directory for rendered tracking videos. Created once so repeated
+# tracks do not leak a temp directory each; Gradio serves the file from here.
+_OUTPUT_DIR = Path(tempfile.mkdtemp(prefix="lazysammy_demo_"))
 
 
 def _get_model(model_size: str) -> SAM2:
     """Return a cached :class:`SAM2` for *model_size*, loading it if needed."""
-    with _MODEL_LOCK:
+    with _MODEL_LOAD_LOCK:
         if model_size not in _MODEL_CACHE:
             logger.info("Loading SAM2 model: %s", model_size)
             _MODEL_CACHE[model_size] = SAM2(model_size)
@@ -99,20 +115,7 @@ def _draw_points_on_image(
         color = (0, 220, 0) if label == 1 else (220, 50, 50)
         cv2.circle(out, (x, y), radius, color, -1)
         cv2.circle(out, (x, y), radius, (255, 255, 255), 2)
-        tag = "+" if label == 1 else "-"
-        cv2.putText(
-            out,
-            tag,
-            (x + radius + 2, y + 4),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            out, tag, (x + radius + 2, y + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA
-        )
+        _draw_label(out, "+" if label == 1 else "-", x + radius + 2, y + 4, color, scale=0.55)
     return out
 
 
@@ -235,9 +238,73 @@ class BoxPrompt:
 VideoPrompt = PointPrompt | BoxPrompt
 
 
+@dataclass
+class ImagePrompts:
+    """Accumulated image-tab prompts for a single object on frame 0.
+
+    ``point`` holds the committed point clicks; ``box_corners`` holds the
+    pending box corners (0, 1, or 2) before they become a :class:`BoxPrompt`.
+    """
+
+    point: PointPrompt | None = None
+    box_corners: list[list[float]] = field(default_factory=list)
+
+
+class ImageTabState(NamedTuple):
+    """Outputs of the image-tab click/undo/clear handlers, in Gradio order."""
+
+    image: np.ndarray | None
+    prompts: ImagePrompts
+    display: str
+
+
+class VideoTabState(NamedTuple):
+    """Outputs of :func:`_on_extract`, in Gradio output order."""
+
+    frame_files: list[str]
+    info: str
+    frames_dir: str | None
+    num_frames: int
+    slider: Any
+    preview: np.ndarray | None
+    clean_frame: np.ndarray | None
+    prompts: list[VideoPrompt]
+    box: list[Any]
+    counter: str
+    prompts_html: str
+
+
 # =========================================================================
 # Tab 1: Image Segmentation
 # =========================================================================
+
+
+def _run_image_segmentation(
+    image: np.ndarray,
+    model_size: str,
+    predict: Callable[[SAM2], ImagePrediction],
+    *,
+    annotate: Callable[[np.ndarray], np.ndarray] | None = None,
+) -> tuple[np.ndarray, str]:
+    """Run one image prediction under the inference lock and format the result.
+
+    Owns the model lookup, the lock, the error handling, and the overlay/info
+    formatting, so the point and box paths differ only in *predict*/*annotate*.
+    """
+    try:
+        sam = _get_model(model_size)
+        with _INFERENCE_LOCK:
+            pred = predict(sam)
+    except _DEMO_ERRORS as exc:
+        logger.exception("Image segmentation failed")
+        return image, f"Error: Segmentation failed: {exc}"
+
+    best = pred.best_mask
+    overlay = draw_masks_on_image(image, best.numpy()[np.newaxis], alpha=0.5)
+    if annotate is not None:
+        overlay = annotate(overlay)
+    info = f"Best mask: IoU: {best.score:.3f} | area: {best.area:,} px"
+    return overlay, info
 
 
 def _segment_with_points(
@@ -254,20 +321,12 @@ def _segment_with_points(
 
     coords = [[p[0], p[1]] for p in points]
     labels = [int(p[2]) for p in points]
-
-    try:
-        sam = _get_model(model_size)
-        with _MODEL_LOCK:
-            pred = sam.segment(image, points=coords, labels=labels, multimask_output=multimask)
-    except (ValueError, RuntimeError, OSError) as exc:
-        logger.exception("Point segmentation failed")
-        return image, f"Error: Segmentation failed: {exc}"
-
-    best = pred.best_mask
-    overlay = draw_masks_on_image(image, best.numpy()[np.newaxis], alpha=0.5)
-    overlay = _draw_points_on_image(overlay, points)
-    info = f"Best mask: IoU: {best.score:.3f} | area: {best.area:,} px"
-    return overlay, info
+    return _run_image_segmentation(
+        image,
+        model_size,
+        lambda sam: sam.segment(image, points=coords, labels=labels, multimask_output=multimask),
+        annotate=lambda overlay: _draw_points_on_image(overlay, points),
+    )
 
 
 def _segment_with_box(
@@ -283,20 +342,14 @@ def _segment_with_box(
 
     x1, y1 = min(box[0], box[2]), min(box[1], box[3])
     x2, y2 = max(box[0], box[2]), max(box[1], box[3])
-
-    try:
-        sam = _get_model(model_size)
-        with _MODEL_LOCK:
-            pred = sam.segment_box(image, x1, y1, x2, y2)
-    except (ValueError, RuntimeError, OSError) as exc:
-        logger.exception("Box segmentation failed")
-        return image, f"Error: Segmentation failed: {exc}"
-
-    best = pred.best_mask
-    overlay = draw_masks_on_image(image, best.numpy()[np.newaxis], alpha=0.5)
-    cv2.rectangle(overlay, (int(x1), int(y1)), (int(x2), int(y2)), (0, 200, 255), 2)
-    info = f"Best mask: IoU: {best.score:.3f} | area: {best.area:,} px"
-    return overlay, info
+    return _run_image_segmentation(
+        image,
+        model_size,
+        lambda sam: sam.segment_box(image, x1, y1, x2, y2),
+        annotate=lambda overlay: cv2.rectangle(
+            overlay, (int(x1), int(y1)), (int(x2), int(y2)), (0, 200, 255), 2
+        ),
+    )
 
 
 # =========================================================================
@@ -315,9 +368,9 @@ def _auto_segment_image(
 
     try:
         sam = _get_model(model_size)
-        with _MODEL_LOCK:
+        with _INFERENCE_LOCK:
             result = sam.auto_segment(image)
-    except (ValueError, RuntimeError, OSError) as exc:
+    except _DEMO_ERRORS as exc:
         logger.exception("Auto segmentation failed")
         return image, f"Error: Auto segmentation failed: {exc}"
 
@@ -344,10 +397,10 @@ def _extract_video_frames(
     video_path: str | None,
     every_n: int,
     max_frames: int,
-) -> tuple[list[str], str, str | None, int]:
-    """Extract frames from an uploaded video and return their paths."""
+) -> VideoTabState:
+    """Extract frames from an uploaded video and build the reset tab state."""
     if not video_path:
-        return [], "Upload a video first.", None, 0
+        return _empty_video_state("Upload a video first.")
 
     try:
         frames_dir = extract_frames(
@@ -356,18 +409,52 @@ def _extract_video_frames(
             max_frames=int(max_frames) or None,
             clean=True,
         )
-    except (FileNotFoundError, RuntimeError, ValueError) as exc:
-        return [], f"Error: Frame extraction failed: {exc}", None, 0
+    except _DEMO_ERRORS as exc:
+        return _empty_video_state(f"Error: Frame extraction failed: {exc}")
 
     frame_paths = sorted(
         (f for f in Path(frames_dir).iterdir() if f.suffix.lower() in _VIDEO_FRAME_EXTS),
         key=natural_sort_key,
     )
     if not frame_paths:
-        return [], "No frames were extracted from this video.", None, 0
+        return _empty_video_state("No frames were extracted from this video.")
 
-    info = f"Extracted {len(frame_paths)} frames to {frames_dir}"
-    return [str(f) for f in frame_paths], info, str(frames_dir), len(frame_paths)
+    first = _get_frame_image([str(f) for f in frame_paths], 0)
+    return VideoTabState(
+        frame_files=[str(f) for f in frame_paths],
+        info=f"Extracted {len(frame_paths)} frames to {frames_dir}",
+        frames_dir=str(frames_dir),
+        num_frames=len(frame_paths),
+        slider=gr.Slider(maximum=max(0, len(frame_paths) - 1), value=0),
+        preview=first,
+        clean_frame=first,
+        prompts=[],
+        box=[],
+        counter=_frame_counter(0, len(frame_paths)),
+        prompts_html=_NO_PROMPTS_HTML,
+    )
+
+
+def _empty_video_state(info: str) -> VideoTabState:
+    """A reset video-tab state carrying only a status message."""
+    return VideoTabState(
+        frame_files=[],
+        info=info,
+        frames_dir=None,
+        num_frames=0,
+        slider=gr.Slider(maximum=0, value=0),
+        preview=None,
+        clean_frame=None,
+        prompts=[],
+        box=[],
+        counter=_frame_counter(0, 0),
+        prompts_html=_NO_PROMPTS_HTML,
+    )
+
+
+def _frame_counter(idx: int, num_frames: int) -> str:
+    """Render the frame counter HTML for *idx* of *num_frames*."""
+    return f'<div class="frame-counter">Frame {idx} / {max(0, num_frames - 1)}</div>'
 
 
 def _get_frame_image(frame_files: list[str], frame_idx: int) -> np.ndarray | None:
@@ -379,6 +466,19 @@ def _get_frame_image(frame_files: list[str], frame_idx: int) -> np.ndarray | Non
     except (FileNotFoundError, ValueError) as exc:
         logger.warning("Could not load frame %s: %s", frame_idx, exc)
         return None
+
+
+def _render_frame(
+    clean_frame: np.ndarray | None,
+    prompts: list[VideoPrompt],
+    vid_box: list[Any],
+    frame_idx: int,
+) -> np.ndarray | None:
+    """Draw committed prompts and any pending box corners for one frame."""
+    annotated = _draw_video_prompts(clean_frame, prompts, frame_idx)
+    if vid_box and annotated is not None:
+        annotated = _draw_box_corners_on_image(annotated, vid_box)
+    return annotated
 
 
 def _draw_video_prompts(
@@ -445,7 +545,7 @@ def _track_and_render(
 
     try:
         sam = _get_model(model_size)
-        with _MODEL_LOCK:
+        with _INFERENCE_LOCK:
             session = sam.video(frames_dir, offload_video_to_cpu=True)
 
             for prompt in prompts_state:
@@ -458,9 +558,9 @@ def _track_and_render(
                 results = session.propagate()
                 direction = "forward"
 
-            # Gradio needs a concrete file, so write to a stable path we control
-            # and clean up on failure.
-            out_path = Path(tempfile.mkdtemp(prefix="lazysammy_")) / "tracking.mp4"
+            # Gradio needs a concrete file. Write into the shared output dir
+            # with a unique name so concurrent tracks do not collide.
+            out_path = _OUTPUT_DIR / f"tracking_{uuid4().hex}.mp4"
             save_video_overlay_mp4(
                 frames_dir,
                 results,
@@ -470,7 +570,7 @@ def _track_and_render(
                 show_ids=True,
                 show_frame_number=True,
             )
-    except (ValueError, RuntimeError, IndexError, OSError) as exc:
+    except _DEMO_ERRORS as exc:
         logger.exception("Tracking failed")
         return None, f"Error: Tracking failed: {exc}"
 
@@ -561,142 +661,145 @@ def _gradio_major_version() -> int:
 # =========================================================================
 
 
-def _format_img_prompts(points: list[Any], box: list[Any]) -> str:
+def _format_img_prompts(prompts: ImagePrompts) -> str:
     """Render the image-tab prompt list as a compact one-line string."""
     parts = []
-    for p in points:
-        kind = "fg" if int(p[2]) == 1 else "bg"
-        parts.append(f"({p[0]:.0f}, {p[1]:.0f}) {kind}")
-    if len(box) == 1:
-        parts.append(f"box corner 1: ({box[0][0]:.0f}, {box[0][1]:.0f}): click 2nd corner")
-    if len(box) >= 2:
-        parts.append(f"box: ({box[0][0]:.0f},{box[0][1]:.0f}) to ({box[1][0]:.0f},{box[1][1]:.0f})")
+    if prompts.point is not None:
+        for pt, lb in zip(prompts.point.points, prompts.point.labels, strict=False):
+            kind = "fg" if lb == 1 else "bg"
+            parts.append(f"({pt[0]:.0f}, {pt[1]:.0f}) {kind}")
+    corners = prompts.box_corners
+    if len(corners) == 1:
+        parts.append(f"box corner 1: ({corners[0][0]:.0f}, {corners[0][1]:.0f}): click 2nd corner")
+    if len(corners) >= 2:
+        parts.append(
+            f"box: ({corners[0][0]:.0f},{corners[0][1]:.0f}) to "
+            f"({corners[1][0]:.0f},{corners[1][1]:.0f})"
+        )
     return " | ".join(parts) if parts else ""
 
 
-def _redraw_input(
-    original: np.ndarray | None, points: list[Any], box: list[Any]
-) -> np.ndarray | None:
+def _redraw_input(original: np.ndarray | None, prompts: ImagePrompts) -> np.ndarray | None:
     """Return a copy of *original* with the current prompts drawn on it."""
     if original is None:
         return None
     out = original.copy()
-    if points:
-        out = _draw_points_on_image(out, points)
-    if box:
-        out = _draw_box_corners_on_image(out, box)
+    if prompts.point is not None:
+        prompts.point.draw(out, (0, 220, 0))
+    if prompts.box_corners:
+        out = _draw_box_corners_on_image(out, prompts.box_corners)
     return out
+
+
+def _image_state(original: np.ndarray | None, prompts: ImagePrompts) -> ImageTabState:
+    """Build the annotated image, prompt state, and display text."""
+    return ImageTabState(
+        image=_redraw_input(original, prompts),
+        prompts=prompts,
+        display=_format_img_prompts(prompts),
+    )
 
 
 def apply_image_click(
     original: np.ndarray | None,
-    points: list[Any],
-    box_corners: list[Any],
+    prompts: ImagePrompts,
     mode: str,
     x: float,
     y: float,
-) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
-    """Apply one image-tab click and return the updated state.
-
-    Returns:
-        ``(annotated_image, points, box_corners, display_text)``.
-    """
+) -> ImageTabState:
+    """Apply one image-tab click and return the updated state."""
     if original is None:
-        return original, points, box_corners, ""
+        return ImageTabState(original, prompts, "")
 
     if _is_box_mode(mode):
-        box_corners = [*box_corners, [x, y]]
-        if len(box_corners) > 2:
-            box_corners = [[x, y]]
+        corners = [*prompts.box_corners, [x, y]]
+        if len(corners) > 2:
+            corners = [[x, y]]
+        prompts = replace(prompts, box_corners=corners)
     else:
         label = _label_for_mode(mode)
-        points = [*points, [x, y, label]]
-
-    display = _format_img_prompts(points, box_corners)
-    annotated = _redraw_input(original, points, box_corners)
-    return annotated, points, box_corners, display
+        if prompts.point is None:
+            prompts = replace(prompts, point=PointPrompt(0, 0, [[x, y]], [label]))
+        else:
+            prompts = replace(
+                prompts,
+                point=replace(
+                    prompts.point,
+                    points=[*prompts.point.points, [x, y]],
+                    labels=[*prompts.point.labels, label],
+                ),
+            )
+    return _image_state(original, prompts)
 
 
 def undo_last_prompt(
     original: np.ndarray | None,
-    points: list[Any],
-    box_corners: list[Any],
+    prompts: ImagePrompts,
     mode: str,
-) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+) -> ImageTabState:
     """Undo the most recent image-tab prompt (point or box corner)."""
     if _is_box_mode(mode):
-        box_corners = box_corners[:-1] if box_corners else []
-    else:
-        points = points[:-1] if points else []
-    display = _format_img_prompts(points, box_corners)
-    annotated = _redraw_input(original, points, box_corners)
-    return annotated, points, box_corners, display
+        prompts = replace(prompts, box_corners=prompts.box_corners[:-1])
+    elif prompts.point is not None:
+        point = prompts.point
+        if len(point.points) > 1:
+            prompts = replace(
+                prompts,
+                point=replace(point, points=point.points[:-1], labels=point.labels[:-1]),
+            )
+        else:
+            prompts = replace(prompts, point=None)
+    return _image_state(original, prompts)
 
 
-def clear_prompts(
-    original: np.ndarray | None,
-) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+def clear_prompts(original: np.ndarray | None) -> ImageTabState:
     """Clear all image-tab prompts, returning a fresh copy of the image."""
     out = original.copy() if original is not None else None
-    return out, [], [], ""
+    return ImageTabState(out, ImagePrompts(), "")
 
 
-def select_segmentation_mode(
-    points: list[Any], box_corners: list[Any]
-) -> tuple[str, list[float] | None]:
-    """Choose box vs point segmentation for the image tab.
-
-    A completed box takes precedence over points.
-
-    Returns:
-        ``("box", [x1, y1, x2, y2])``, ``("points", None)``, or ``("none", None)``.
-    """
-    if len(box_corners) >= 2:
-        flat = [
-            box_corners[0][0],
-            box_corners[0][1],
-            box_corners[1][0],
-            box_corners[1][1],
-        ]
-        return "box", flat
-    if points:
-        return "points", None
-    return "none", None
+def select_segmentation_mode(prompts: ImagePrompts) -> BoxPrompt | PointPrompt | None:
+    """Choose the prompt to segment with; a completed box wins over points."""
+    corners = prompts.box_corners
+    if len(corners) >= 2:
+        (x1, y1), (x2, y2) = corners
+        return BoxPrompt(0, 0, [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)])
+    return prompts.point
 
 
 def _on_image_upload(
     img: np.ndarray | None,
-) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+    mode: str,
+) -> tuple[np.ndarray | None, ImagePrompts, str]:
     """Reset prompt state when a new image is uploaded."""
-    return img, [], [], _render_mode_instruction(MODE_FOREGROUND)
+    return img, ImagePrompts(), _render_mode_instruction(mode)
 
 
 def _on_image_click(
     original: np.ndarray | None,
-    points: list[Any],
-    box_corners: list[Any],
+    prompts: ImagePrompts,
     mode: str,
     evt: gr.SelectData,
-) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+) -> ImageTabState:
     """Gradio ``select`` adapter: unpack the click coordinates."""
     x, y = evt.index[0], evt.index[1]
-    return apply_image_click(original, points, box_corners, mode, x, y)
+    return apply_image_click(original, prompts, mode, x, y)
 
 
 def _segment(
     original: np.ndarray | None,
-    points: list[Any],
-    box_corners: list[Any],
+    prompts: ImagePrompts,
     ms: str,
     multimask: bool,
 ) -> tuple[np.ndarray | None, str]:
     """Dispatch image-tab segmentation to box or point mode."""
     if original is None:
         return None, "Upload an image first."
-    kind, flat = select_segmentation_mode(points, box_corners)
-    if kind == "box" and flat is not None:
-        return _segment_with_box(original, flat, ms)
-    if kind == "points":
+    prompt = select_segmentation_mode(prompts)
+    if isinstance(prompt, BoxPrompt):
+        return _segment_with_box(original, prompt.box, ms)
+    if isinstance(prompt, PointPrompt):
+        points = [[pt[0], pt[1], lb] for pt, lb in zip(prompt.points, prompt.labels, strict=False)]
         return _segment_with_points(original, points, ms, multimask)
     return original, "Add some prompts first (click on the image)."
 
@@ -706,45 +809,9 @@ def _segment(
 # =========================================================================
 
 
-class VideoTabState(NamedTuple):
-    """Outputs of :func:`_on_extract`, in Gradio output order."""
-
-    frame_files: list[str]
-    info: str
-    frames_dir: str | None
-    num_frames: int
-    slider: Any
-    preview: np.ndarray | None
-    clean_frame: np.ndarray | None
-    prompts: list[VideoPrompt]
-    box: list[Any]
-    counter: str
-    prompts_html: str
-
-
 def _on_extract(video_path: str | None, every_n: int, max_frames: int) -> VideoTabState:
     """Extract frames from an uploaded video and reset the video-tab state."""
-    ff, info, fd, nf = _extract_video_frames(
-        video_path,
-        every_n,
-        int(max_frames) or 0,
-    )
-    first = _get_frame_image(ff, 0)
-    slider_update = gr.Slider(maximum=max(0, nf - 1), value=0)
-    counter = f'<div class="frame-counter">Frame 0 / {max(0, nf - 1)}</div>'
-    return VideoTabState(
-        frame_files=ff,
-        info=info,
-        frames_dir=fd,
-        num_frames=nf,
-        slider=slider_update,
-        preview=first,
-        clean_frame=first,
-        prompts=[],
-        box=[],
-        counter=counter,
-        prompts_html=_NO_PROMPTS_HTML,
-    )
+    return _extract_video_frames(video_path, every_n, int(max_frames) or 0)
 
 
 def _on_slider_change(
@@ -756,13 +823,9 @@ def _on_slider_change(
 ) -> tuple[np.ndarray | None, np.ndarray | None, str]:
     """Redraw the preview when the frame slider moves."""
     idx = int(idx)
-    total = max(0, int(num_frames) - 1)
     clean = _get_frame_image(frame_files, idx)
-    annotated = _draw_video_prompts(clean, prompts, idx)
-    if vid_box and annotated is not None:
-        annotated = _draw_box_corners_on_image(annotated, vid_box)
-    counter = f'<div class="frame-counter">Frame {idx} / {total}</div>'
-    return annotated, clean, counter
+    annotated = _render_frame(clean, prompts, vid_box, idx)
+    return annotated, clean, _frame_counter(idx, int(num_frames))
 
 
 def _append_point(
@@ -815,9 +878,7 @@ def _on_frame_click(
         prompts = _append_point(prompts, frame_idx, obj_id, x, y, _label_for_mode(mode))
 
     display = _format_prompts_html(prompts)
-    annotated = _draw_video_prompts(clean_frame, prompts, frame_idx)
-    if vid_box:
-        annotated = _draw_box_corners_on_image(annotated, vid_box)
+    annotated = _render_frame(clean_frame, prompts, vid_box, frame_idx)
     return annotated, prompts, vid_box, display
 
 
@@ -842,9 +903,7 @@ def _vid_undo(
         else:
             prompts = prompts[:-1]
     display = _format_prompts_html(prompts)
-    annotated = _draw_video_prompts(clean_frame, prompts, frame_idx)
-    if vid_box:
-        annotated = _draw_box_corners_on_image(annotated, vid_box)
+    annotated = _render_frame(clean_frame, prompts, vid_box, frame_idx)
     return annotated, prompts, vid_box, display
 
 
@@ -862,6 +921,388 @@ def _style_kwargs() -> dict[str, Any]:
     ``launch()``; this is the single place that knows which one applies.
     """
     return {"theme": gr.themes.Soft(), "css": _CSS}
+
+
+def _build_image_tab(model_size: gr.Dropdown) -> None:
+    """Build the Image Segmentation tab and wire its events."""
+    with gr.Tab("Image Segmentation"):
+        gr.Markdown(
+            "Upload an image, then **click directly on it** to place "
+            "prompts. Choose a mode below before clicking."
+        )
+
+        # -- Prompt mode selection --
+        with gr.Row():
+            prompt_mode = gr.Radio(
+                choices=MODE_CHOICES,
+                value=MODE_FOREGROUND,
+                label="Click Mode",
+                info="Select what happens when you click on the image.",
+            )
+            multimask_toggle = gr.Checkbox(
+                label="Multi-mask output",
+                value=True,
+            )
+
+        click_instruction = gr.HTML(_render_mode_instruction(MODE_FOREGROUND))
+
+        # -- Images side-by-side --
+        with gr.Row():
+            with gr.Column(scale=1):
+                img_input = gr.Image(
+                    label="Input Image: click to add prompts",
+                    type="numpy",
+                    height=512,
+                )
+            with gr.Column(scale=1):
+                img_output = gr.Image(
+                    label="Segmentation Result",
+                    height=512,
+                )
+                img_info = gr.Textbox(label="Info", interactive=False)
+
+        # -- Hidden states --
+        points_state = gr.State(ImagePrompts())
+        current_img_state = gr.State(None)  # clean original image
+
+        # -- Action buttons --
+        with gr.Row():
+            segment_btn = gr.Button(
+                "Segment",
+                variant="primary",
+                size="lg",
+            )
+            undo_btn = gr.Button("Undo Last", variant="secondary")
+            clear_btn = gr.Button("Clear All", variant="stop")
+
+        points_display = gr.Textbox(
+            label="Current Prompts",
+            interactive=False,
+            lines=2,
+            placeholder="No prompts yet. Click on the image above.",
+        )
+
+        # ---- Image tab helpers ----
+
+        # ---- Image tab events ----
+
+        # NOTE: the upload/reset listener must use `.input()`, not `.change()`.
+        # `change` also fires for *programmatic* updates, and the click
+        # handler writes the annotated image back into `img_input`, so a
+        # `change` listener here would wipe the prompt state on every click.
+        img_input.input(
+            fn=_on_image_upload,
+            inputs=[img_input, prompt_mode],
+            outputs=[current_img_state, points_state, click_instruction],
+        )
+
+        prompt_mode.change(
+            fn=_render_mode_instruction,
+            inputs=[prompt_mode],
+            outputs=[click_instruction],
+        )
+
+        img_input.select(
+            fn=_on_image_click,
+            inputs=[current_img_state, points_state, prompt_mode],
+            outputs=[img_input, points_state, points_display],
+        )
+
+        undo_btn.click(
+            fn=undo_last_prompt,
+            inputs=[current_img_state, points_state, prompt_mode],
+            outputs=[img_input, points_state, points_display],
+        )
+
+        clear_btn.click(
+            fn=clear_prompts,
+            inputs=[current_img_state],
+            outputs=[img_input, points_state, points_display],
+        )
+
+        segment_btn.click(
+            fn=_segment,
+            inputs=[current_img_state, points_state, model_size, multimask_toggle],
+            outputs=[img_output, img_info],
+        )
+
+
+def _build_auto_tab(model_size: gr.Dropdown) -> None:
+    """Build the Auto Segment tab and wire its events."""
+    with gr.Tab("Auto Segment"):
+        gr.Markdown("Upload an image to automatically segment **every object**: no prompts needed.")
+        with gr.Row():
+            with gr.Column(scale=1):
+                auto_img_input = gr.Image(
+                    label="Input Image",
+                    type="numpy",
+                    height=480,
+                )
+                with gr.Row():
+                    auto_min_area = gr.Slider(
+                        minimum=0,
+                        maximum=50_000,
+                        step=100,
+                        value=0,
+                        label="Min mask area (px)",
+                    )
+                    auto_min_iou = gr.Slider(
+                        minimum=0.0,
+                        maximum=1.0,
+                        step=0.05,
+                        value=0.7,
+                        label="Min predicted IoU",
+                    )
+                auto_btn = gr.Button("Auto Segment", variant="primary")
+
+            with gr.Column(scale=1):
+                auto_img_output = gr.Image(label="All Masks", height=480)
+                auto_info = gr.Textbox(label="Info", interactive=False)
+
+        auto_btn.click(
+            fn=_auto_segment_image,
+            inputs=[auto_img_input, model_size, auto_min_area, auto_min_iou],
+            outputs=[auto_img_output, auto_info],
+        )
+
+
+def _build_video_tab(model_size: gr.Dropdown) -> None:
+    """Build the Video Tracking tab and wire its events."""
+    with gr.Tab("Video Tracking"):
+        gr.Markdown(
+            "1. Upload a video. 2. Click on frames to mark objects. "
+            "3. Run tracking to get an overlay video.  \n"
+            "> **Tip:** Enable *Bidirectional* if your prompts are on "
+            "a mid-video frame so tracking runs both forward *and* backward."
+        )
+
+        # -- State --
+        frame_files_state = gr.State([])
+        frames_dir_state = gr.State(None)
+        num_frames_state = gr.State(0)
+        video_prompts_state = gr.State([])
+        clean_frame_state = gr.State(None)
+        vid_box_state = gr.State([])
+
+        # -- Step 1: Upload & extract --
+        with gr.Group():
+            gr.HTML('<div class="step-header">1. Load Video</div>')
+            with gr.Row():
+                with gr.Column(scale=2):
+                    video_input = gr.Video(label="Upload Video")
+                with gr.Column(scale=1):
+                    extract_every_n = gr.Slider(
+                        minimum=1,
+                        maximum=30,
+                        step=1,
+                        value=1,
+                        label="Extract every N-th frame",
+                        info="Use higher values for long videos to speed up extraction.",
+                    )
+                    extract_max = gr.Slider(
+                        minimum=0,
+                        maximum=500,
+                        step=10,
+                        value=200,
+                        label="Max frames (0 = all)",
+                    )
+                    extract_btn = gr.Button(
+                        "Extract Frames",
+                        variant="primary",
+                    )
+            extract_info = gr.Textbox(label="Status", interactive=False)
+
+        # -- Step 2: Prompt placement --
+        with gr.Group():
+            gr.HTML('<div class="step-header">2. Add Prompts: click on the frame</div>')
+
+            with gr.Row():
+                # Left column: frame navigation + click controls
+                with gr.Column(scale=1):
+                    frame_slider = gr.Slider(
+                        minimum=0,
+                        maximum=1,
+                        step=1,
+                        value=0,
+                        label="Frame",
+                        interactive=True,
+                    )
+                    frame_counter_html = gr.HTML('<div class="frame-counter">Frame 0 / 0</div>')
+                    with gr.Row():
+                        vid_prompt_obj_id = gr.Number(
+                            label="Object ID",
+                            value=1,
+                            precision=0,
+                            info="Each unique ID gets its own colour.",
+                        )
+                        vid_prompt_mode = gr.Radio(
+                            choices=MODE_CHOICES,
+                            value=MODE_FOREGROUND,
+                            label="Click Mode",
+                        )
+                    vid_click_instruction = gr.HTML(_render_mode_instruction(MODE_FOREGROUND))
+
+                # Right column: prompt list + actions
+                with gr.Column(scale=1):
+                    vid_prompts_display = gr.HTML(_NO_PROMPTS_HTML)
+                    with gr.Row():
+                        vid_undo_btn = gr.Button(
+                            "Undo Last",
+                            variant="secondary",
+                            size="sm",
+                        )
+                        vid_clear_btn = gr.Button(
+                            "Clear All Prompts",
+                            variant="stop",
+                            size="sm",
+                        )
+
+            frame_preview = gr.Image(
+                label="Frame Preview: click to add prompts",
+                height=500,
+                interactive=False,
+            )
+
+        # -- Step 3: Track --
+        with gr.Group():
+            gr.HTML('<div class="step-header">3. Track & Render</div>')
+            with gr.Row():
+                with gr.Column(scale=1):
+                    track_bidirectional = gr.Checkbox(
+                        label="Bidirectional propagation",
+                        value=False,
+                        info=(
+                            "Track both forward and backward from the "
+                            "prompt frame. Enable this when your prompts "
+                            "are in the middle of the video."
+                        ),
+                    )
+                    with gr.Row():
+                        track_fps = gr.Slider(
+                            minimum=1,
+                            maximum=60,
+                            step=1,
+                            value=24,
+                            label="Output FPS",
+                        )
+                        track_alpha = gr.Slider(
+                            minimum=0.0,
+                            maximum=1.0,
+                            step=0.05,
+                            value=0.5,
+                            label="Overlay Alpha",
+                        )
+                    track_btn = gr.Button(
+                        "Track & Render Video",
+                        variant="primary",
+                        size="lg",
+                    )
+                    track_info = gr.Textbox(label="Status", interactive=False)
+                with gr.Column(scale=1):
+                    track_output = gr.Video(label="Result Video")
+
+        # ---- Video tab events ----
+
+        extract_outputs = [
+            frame_files_state,
+            extract_info,
+            frames_dir_state,
+            num_frames_state,
+            frame_slider,
+            frame_preview,
+            clean_frame_state,
+            video_prompts_state,
+            vid_box_state,
+            frame_counter_html,
+            vid_prompts_display,
+        ]
+        # Keep the wiring honest: the outputs must match VideoTabState order.
+        assert len(extract_outputs) == len(VideoTabState._fields)
+        extract_btn.click(
+            fn=_on_extract,
+            inputs=[video_input, extract_every_n, extract_max],
+            outputs=extract_outputs,
+        )
+
+        # The slider redraws the preview, so it must use `.input()` (user
+        # only) rather than `.change()`, which also fires on programmatic
+        # updates and would re-enter this handler.
+        frame_slider.input(
+            fn=_on_slider_change,
+            inputs=[
+                frame_files_state,
+                frame_slider,
+                video_prompts_state,
+                vid_box_state,
+                num_frames_state,
+            ],
+            outputs=[frame_preview, clean_frame_state, frame_counter_html],
+        )
+
+        vid_prompt_mode.change(
+            fn=_render_mode_instruction,
+            inputs=[vid_prompt_mode],
+            outputs=[vid_click_instruction],
+        )
+
+        frame_preview.select(
+            fn=_on_frame_click,
+            inputs=[
+                clean_frame_state,
+                video_prompts_state,
+                vid_box_state,
+                frame_slider,
+                vid_prompt_obj_id,
+                vid_prompt_mode,
+            ],
+            outputs=[
+                frame_preview,
+                video_prompts_state,
+                vid_box_state,
+                vid_prompts_display,
+            ],
+        )
+
+        vid_undo_btn.click(
+            fn=_vid_undo,
+            inputs=[
+                clean_frame_state,
+                video_prompts_state,
+                vid_box_state,
+                frame_slider,
+                vid_prompt_mode,
+            ],
+            outputs=[
+                frame_preview,
+                video_prompts_state,
+                vid_box_state,
+                vid_prompts_display,
+            ],
+        )
+
+        vid_clear_btn.click(
+            fn=_vid_clear,
+            inputs=[clean_frame_state],
+            outputs=[
+                frame_preview,
+                video_prompts_state,
+                vid_box_state,
+                vid_prompts_display,
+            ],
+        )
+
+        track_btn.click(
+            fn=_track_and_render,
+            inputs=[
+                frames_dir_state,
+                video_prompts_state,
+                model_size,
+                track_fps,
+                track_alpha,
+                track_bidirectional,
+            ],
+            outputs=[track_output, track_info],
+        )
 
 
 def build_app() -> gr.Blocks:
@@ -891,396 +1332,9 @@ def build_app() -> gr.Blocks:
             info="Larger = more accurate but slower and heavier.",
         )
 
-        # ==============================================================
-        # Tab 1: Image Segmentation (click-to-prompt)
-        # ==============================================================
-
-        with gr.Tab("Image Segmentation"):
-            gr.Markdown(
-                "Upload an image, then **click directly on it** to place "
-                "prompts. Choose a mode below before clicking."
-            )
-
-            # -- Prompt mode selection --
-            with gr.Row():
-                prompt_mode = gr.Radio(
-                    choices=MODE_CHOICES,
-                    value=MODE_FOREGROUND,
-                    label="Click Mode",
-                    info="Select what happens when you click on the image.",
-                )
-                multimask_toggle = gr.Checkbox(
-                    label="Multi-mask output",
-                    value=True,
-                )
-
-            click_instruction = gr.HTML(_render_mode_instruction(MODE_FOREGROUND))
-
-            # -- Images side-by-side --
-            with gr.Row():
-                with gr.Column(scale=1):
-                    img_input = gr.Image(
-                        label="Input Image: click to add prompts",
-                        type="numpy",
-                        height=512,
-                    )
-                with gr.Column(scale=1):
-                    img_output = gr.Image(
-                        label="Segmentation Result",
-                        height=512,
-                    )
-                    img_info = gr.Textbox(label="Info", interactive=False)
-
-            # -- Hidden states --
-            points_state = gr.State([])  # [[x, y, label], ...]
-            box_state = gr.State([])  # [[x,y], [x,y]]
-            current_img_state = gr.State(None)  # clean original image
-
-            # -- Action buttons --
-            with gr.Row():
-                segment_btn = gr.Button(
-                    "Segment",
-                    variant="primary",
-                    size="lg",
-                )
-                undo_btn = gr.Button("Undo Last", variant="secondary")
-                clear_btn = gr.Button("Clear All", variant="stop")
-
-            points_display = gr.Textbox(
-                label="Current Prompts",
-                interactive=False,
-                lines=2,
-                placeholder="No prompts yet. Click on the image above.",
-            )
-
-            # ---- Image tab helpers ----
-
-            # ---- Image tab events ----
-
-            # NOTE: the upload/reset listener must use `.input()`, not `.change()`.
-            # `change` also fires for *programmatic* updates, and the click
-            # handler writes the annotated image back into `img_input`, so a
-            # `change` listener here would wipe the prompt state on every click.
-            img_input.input(
-                fn=_on_image_upload,
-                inputs=[img_input],
-                outputs=[current_img_state, points_state, box_state, click_instruction],
-            )
-
-            prompt_mode.change(
-                fn=_render_mode_instruction,
-                inputs=[prompt_mode],
-                outputs=[click_instruction],
-            )
-
-            img_input.select(
-                fn=_on_image_click,
-                inputs=[current_img_state, points_state, box_state, prompt_mode],
-                outputs=[img_input, points_state, box_state, points_display],
-            )
-
-            undo_btn.click(
-                fn=undo_last_prompt,
-                inputs=[current_img_state, points_state, box_state, prompt_mode],
-                outputs=[img_input, points_state, box_state, points_display],
-            )
-
-            clear_btn.click(
-                fn=clear_prompts,
-                inputs=[current_img_state],
-                outputs=[img_input, points_state, box_state, points_display],
-            )
-
-            segment_btn.click(
-                fn=_segment,
-                inputs=[
-                    current_img_state,
-                    points_state,
-                    box_state,
-                    model_size,
-                    multimask_toggle,
-                ],
-                outputs=[img_output, img_info],
-            )
-
-        # ==============================================================
-        # Tab 2: Auto Segment Everything
-        # ==============================================================
-
-        with gr.Tab("Auto Segment"):
-            gr.Markdown(
-                "Upload an image to automatically segment **every object**: no prompts needed."
-            )
-            with gr.Row():
-                with gr.Column(scale=1):
-                    auto_img_input = gr.Image(
-                        label="Input Image",
-                        type="numpy",
-                        height=480,
-                    )
-                    with gr.Row():
-                        auto_min_area = gr.Slider(
-                            minimum=0,
-                            maximum=50_000,
-                            step=100,
-                            value=0,
-                            label="Min mask area (px)",
-                        )
-                        auto_min_iou = gr.Slider(
-                            minimum=0.0,
-                            maximum=1.0,
-                            step=0.05,
-                            value=0.7,
-                            label="Min predicted IoU",
-                        )
-                    auto_btn = gr.Button("Auto Segment", variant="primary")
-
-                with gr.Column(scale=1):
-                    auto_img_output = gr.Image(label="All Masks", height=480)
-                    auto_info = gr.Textbox(label="Info", interactive=False)
-
-            auto_btn.click(
-                fn=_auto_segment_image,
-                inputs=[auto_img_input, model_size, auto_min_area, auto_min_iou],
-                outputs=[auto_img_output, auto_info],
-            )
-
-        # ==============================================================
-        # Tab 3: Video Object Tracking (click-to-prompt)
-        # ==============================================================
-
-        with gr.Tab("Video Tracking"):
-            gr.Markdown(
-                "1. Upload a video. 2. Click on frames to mark objects. "
-                "3. Run tracking to get an overlay video.  \n"
-                "> **Tip:** Enable *Bidirectional* if your prompts are on "
-                "a mid-video frame so tracking runs both forward *and* backward."
-            )
-
-            # -- State --
-            frame_files_state = gr.State([])
-            frames_dir_state = gr.State(None)
-            num_frames_state = gr.State(0)
-            video_prompts_state = gr.State([])
-            clean_frame_state = gr.State(None)
-            vid_box_state = gr.State([])
-
-            # -- Step 1: Upload & extract --
-            with gr.Group():
-                gr.HTML('<div class="step-header">1. Load Video</div>')
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        video_input = gr.Video(label="Upload Video")
-                    with gr.Column(scale=1):
-                        extract_every_n = gr.Slider(
-                            minimum=1,
-                            maximum=30,
-                            step=1,
-                            value=1,
-                            label="Extract every N-th frame",
-                            info="Use higher values for long videos to speed up extraction.",
-                        )
-                        extract_max = gr.Slider(
-                            minimum=0,
-                            maximum=500,
-                            step=10,
-                            value=200,
-                            label="Max frames (0 = all)",
-                        )
-                        extract_btn = gr.Button(
-                            "Extract Frames",
-                            variant="primary",
-                        )
-                extract_info = gr.Textbox(label="Status", interactive=False)
-
-            # -- Step 2: Prompt placement --
-            with gr.Group():
-                gr.HTML('<div class="step-header">2. Add Prompts: click on the frame</div>')
-
-                with gr.Row():
-                    # Left column: frame navigation + click controls
-                    with gr.Column(scale=1):
-                        frame_slider = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            step=1,
-                            value=0,
-                            label="Frame",
-                            interactive=True,
-                        )
-                        frame_counter_html = gr.HTML('<div class="frame-counter">Frame 0 / 0</div>')
-                        with gr.Row():
-                            vid_prompt_obj_id = gr.Number(
-                                label="Object ID",
-                                value=1,
-                                precision=0,
-                                info="Each unique ID gets its own colour.",
-                            )
-                            vid_prompt_mode = gr.Radio(
-                                choices=MODE_CHOICES,
-                                value=MODE_FOREGROUND,
-                                label="Click Mode",
-                            )
-                        vid_click_instruction = gr.HTML(_render_mode_instruction(MODE_FOREGROUND))
-
-                    # Right column: prompt list + actions
-                    with gr.Column(scale=1):
-                        vid_prompts_display = gr.HTML(_NO_PROMPTS_HTML)
-                        with gr.Row():
-                            vid_undo_btn = gr.Button(
-                                "Undo Last",
-                                variant="secondary",
-                                size="sm",
-                            )
-                            vid_clear_btn = gr.Button(
-                                "Clear All Prompts",
-                                variant="stop",
-                                size="sm",
-                            )
-
-                frame_preview = gr.Image(
-                    label="Frame Preview: click to add prompts",
-                    height=500,
-                    interactive=False,
-                )
-
-            # -- Step 3: Track --
-            with gr.Group():
-                gr.HTML('<div class="step-header">3. Track & Render</div>')
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        track_bidirectional = gr.Checkbox(
-                            label="Bidirectional propagation",
-                            value=False,
-                            info=(
-                                "Track both forward and backward from the "
-                                "prompt frame. Enable this when your prompts "
-                                "are in the middle of the video."
-                            ),
-                        )
-                        with gr.Row():
-                            track_fps = gr.Slider(
-                                minimum=1,
-                                maximum=60,
-                                step=1,
-                                value=24,
-                                label="Output FPS",
-                            )
-                            track_alpha = gr.Slider(
-                                minimum=0.0,
-                                maximum=1.0,
-                                step=0.05,
-                                value=0.5,
-                                label="Overlay Alpha",
-                            )
-                        track_btn = gr.Button(
-                            "Track & Render Video",
-                            variant="primary",
-                            size="lg",
-                        )
-                        track_info = gr.Textbox(label="Status", interactive=False)
-                    with gr.Column(scale=1):
-                        track_output = gr.Video(label="Result Video")
-
-            # ---- Video tab events ----
-
-            extract_btn.click(
-                fn=_on_extract,
-                inputs=[video_input, extract_every_n, extract_max],
-                outputs=[
-                    frame_files_state,
-                    extract_info,
-                    frames_dir_state,
-                    num_frames_state,
-                    frame_slider,
-                    frame_preview,
-                    clean_frame_state,
-                    video_prompts_state,
-                    vid_box_state,
-                    frame_counter_html,
-                    vid_prompts_display,
-                ],
-            )
-
-            # The slider redraws the preview, so it must use `.input()` (user
-            # only) rather than `.change()`, which also fires on programmatic
-            # updates and would re-enter this handler.
-            frame_slider.input(
-                fn=_on_slider_change,
-                inputs=[
-                    frame_files_state,
-                    frame_slider,
-                    video_prompts_state,
-                    vid_box_state,
-                    num_frames_state,
-                ],
-                outputs=[frame_preview, clean_frame_state, frame_counter_html],
-            )
-
-            vid_prompt_mode.change(
-                fn=_render_mode_instruction,
-                inputs=[vid_prompt_mode],
-                outputs=[vid_click_instruction],
-            )
-
-            frame_preview.select(
-                fn=_on_frame_click,
-                inputs=[
-                    clean_frame_state,
-                    video_prompts_state,
-                    vid_box_state,
-                    frame_slider,
-                    vid_prompt_obj_id,
-                    vid_prompt_mode,
-                ],
-                outputs=[
-                    frame_preview,
-                    video_prompts_state,
-                    vid_box_state,
-                    vid_prompts_display,
-                ],
-            )
-
-            vid_undo_btn.click(
-                fn=_vid_undo,
-                inputs=[
-                    clean_frame_state,
-                    video_prompts_state,
-                    vid_box_state,
-                    frame_slider,
-                    vid_prompt_mode,
-                ],
-                outputs=[
-                    frame_preview,
-                    video_prompts_state,
-                    vid_box_state,
-                    vid_prompts_display,
-                ],
-            )
-
-            vid_clear_btn.click(
-                fn=_vid_clear,
-                inputs=[clean_frame_state],
-                outputs=[
-                    frame_preview,
-                    video_prompts_state,
-                    vid_box_state,
-                    vid_prompts_display,
-                ],
-            )
-
-            track_btn.click(
-                fn=_track_and_render,
-                inputs=[
-                    frames_dir_state,
-                    video_prompts_state,
-                    model_size,
-                    track_fps,
-                    track_alpha,
-                    track_bidirectional,
-                ],
-                outputs=[track_output, track_info],
-            )
+        _build_image_tab(model_size)
+        _build_auto_tab(model_size)
+        _build_video_tab(model_size)
 
     return app
 

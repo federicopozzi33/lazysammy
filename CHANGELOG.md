@@ -61,6 +61,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The demo's video prompts are typed `PointPrompt` / `BoxPrompt` objects rather
   than `dict`s with a `"type"` string, so drawing, session application, and
   summary rendering are polymorphic instead of re-branched per call site.
+- The demo's image tab now uses the same typed prompt model (an `ImagePrompts`
+  holding a `PointPrompt` and pending box corners) instead of `list[Any]` with
+  magic indices, and its handlers return an `ImageTabState` NamedTuple.
+- `build_app()` is split into `_build_image_tab()`, `_build_auto_tab()`, and
+  `_build_video_tab()`; the top-level builder is now a short composition.
+- The demo's image segmentation point/box paths share one
+  `_run_image_segmentation()` helper, and the video handlers share
+  `_render_frame()`.
+- The demo separates the model-load lock from the inference lock, so loading a
+  second model size no longer blocks inference on an already-loaded one.
+- The demo writes rendered tracking videos into one shared output directory
+  instead of leaking a fresh temp directory per track.
 
 ### Fixed
 

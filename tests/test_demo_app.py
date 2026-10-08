@@ -141,95 +141,107 @@ def stub_sam(app_module: Any, monkeypatch: pytest.MonkeyPatch) -> _StubSAM:
 
 
 def test_point_click_appends_labeled_point(app_module: Any, sample_rgb: np.ndarray) -> None:
-    preview, points, box, display = app_module.apply_image_click(
-        sample_rgb, [], [], app_module.MODE_FOREGROUND, 40.0, 50.0
+    state = app_module.apply_image_click(
+        sample_rgb, app_module.ImagePrompts(), app_module.MODE_FOREGROUND, 40.0, 50.0
     )
-    assert points == [[40.0, 50.0, 1]]
-    assert box == []
-    assert "fg" in display
-    assert preview is not None
-    assert bool((preview != sample_rgb).any())
+    assert state.prompts.point is not None
+    assert state.prompts.point.points == [[40.0, 50.0]]
+    assert state.prompts.point.labels == [1]
+    assert state.prompts.box_corners == []
+    assert "fg" in state.display
+    assert state.image is not None
+    assert bool((state.image != sample_rgb).any())
 
 
 def test_background_click_uses_label_zero(app_module: Any, sample_rgb: np.ndarray) -> None:
-    _, points, _, display = app_module.apply_image_click(
-        sample_rgb, [], [], app_module.MODE_BACKGROUND, 10.0, 20.0
+    state = app_module.apply_image_click(
+        sample_rgb, app_module.ImagePrompts(), app_module.MODE_BACKGROUND, 10.0, 20.0
     )
-    assert points == [[10.0, 20.0, 0]]
-    assert "bg" in display
+    assert state.prompts.point is not None
+    assert state.prompts.point.labels == [0]
+    assert "bg" in state.display
 
 
 def test_box_mode_two_clicks_defines_box(app_module: Any, sample_rgb: np.ndarray) -> None:
-    _, _, box, _ = app_module.apply_image_click(sample_rgb, [], [], app_module.MODE_BOX, 10.0, 10.0)
-    assert box == [[10.0, 10.0]]
-
-    _, points, box, display = app_module.apply_image_click(
-        sample_rgb, [], box, app_module.MODE_BOX, 60.0, 70.0
+    state = app_module.apply_image_click(
+        sample_rgb, app_module.ImagePrompts(), app_module.MODE_BOX, 10.0, 10.0
     )
-    assert box == [[10.0, 10.0], [60.0, 70.0]]
-    assert points == []
-    assert "box" in display.lower()
+    assert state.prompts.box_corners == [[10.0, 10.0]]
+
+    state = app_module.apply_image_click(sample_rgb, state.prompts, app_module.MODE_BOX, 60.0, 70.0)
+    assert state.prompts.box_corners == [[10.0, 10.0], [60.0, 70.0]]
+    assert state.prompts.point is None
+    assert "box" in state.display.lower()
 
 
 def test_box_mode_third_click_starts_new_box(app_module: Any, sample_rgb: np.ndarray) -> None:
-    _, _, box, _ = app_module.apply_image_click(
-        sample_rgb, [], [[10.0, 10.0], [60.0, 70.0]], app_module.MODE_BOX, 5.0, 5.0
-    )
-    assert box == [[5.0, 5.0]]
+    prompts = app_module.ImagePrompts(box_corners=[[10.0, 10.0], [60.0, 70.0]])
+    state = app_module.apply_image_click(sample_rgb, prompts, app_module.MODE_BOX, 5.0, 5.0)
+    assert state.prompts.box_corners == [[5.0, 5.0]]
 
 
 def test_click_before_upload_is_a_noop(app_module: Any) -> None:
-    preview, points, box, display = app_module.apply_image_click(
-        None, [], [], app_module.MODE_FOREGROUND, 1.0, 2.0
+    state = app_module.apply_image_click(
+        None, app_module.ImagePrompts(), app_module.MODE_FOREGROUND, 1.0, 2.0
     )
-    assert preview is None
-    assert points == []
-    assert box == []
-    assert display == ""
+    assert state.image is None
+    assert state.prompts.point is None
+    assert state.prompts.box_corners == []
+    assert state.display == ""
 
 
 def test_undo_removes_last_point(app_module: Any) -> None:
-    _, points, _, _ = app_module.undo_last_prompt(
-        None, [[1.0, 2.0, 1], [3.0, 4.0, 1]], [], app_module.MODE_FOREGROUND
+    prompts = app_module.ImagePrompts(
+        point=app_module.PointPrompt(0, 0, [[1.0, 2.0], [3.0, 4.0]], [1, 1])
     )
-    assert points == [[1.0, 2.0, 1]]
+    state = app_module.undo_last_prompt(None, prompts, app_module.MODE_FOREGROUND)
+    assert state.prompts.point is not None
+    assert state.prompts.point.points == [[1.0, 2.0]]
 
 
 def test_undo_on_empty_state_is_safe(app_module: Any) -> None:
-    _, points, box, display = app_module.undo_last_prompt(None, [], [], app_module.MODE_FOREGROUND)
-    assert points == []
-    assert box == []
-    assert display == ""
+    state = app_module.undo_last_prompt(None, app_module.ImagePrompts(), app_module.MODE_FOREGROUND)
+    assert state.prompts.point is None
+    assert state.prompts.box_corners == []
+    assert state.display == ""
 
 
 def test_clear_prompts_resets_state_and_copies_image(
     app_module: Any, sample_rgb: np.ndarray
 ) -> None:
-    out, points, box, display = app_module.clear_prompts(sample_rgb)
-    assert points == []
-    assert box == []
-    assert display == ""
-    assert out is not None
-    assert out is not sample_rgb
+    state = app_module.clear_prompts(sample_rgb)
+    assert state.prompts.point is None
+    assert state.prompts.box_corners == []
+    assert state.display == ""
+    assert state.image is not None
+    assert state.image is not sample_rgb
 
 
 def test_clear_prompts_tolerates_missing_image(app_module: Any) -> None:
-    out, points, box, _ = app_module.clear_prompts(None)
-    assert out is None
-    assert points == []
-    assert box == []
+    state = app_module.clear_prompts(None)
+    assert state.image is None
+    assert state.prompts.point is None
+    assert state.prompts.box_corners == []
 
 
 def test_segment_prefers_box_when_two_corners_present(app_module: Any) -> None:
-    kind, flat = app_module.select_segmentation_mode([[1.0, 2.0, 1]], [[10.0, 10.0], [60.0, 70.0]])
-    assert kind == "box"
-    assert flat == [10.0, 10.0, 60.0, 70.0]
+    prompts = app_module.ImagePrompts(
+        point=app_module.PointPrompt(0, 0, [[1.0, 2.0]], [1]),
+        box_corners=[[10.0, 10.0], [60.0, 70.0]],
+    )
+    prompt = app_module.select_segmentation_mode(prompts)
+    assert isinstance(prompt, app_module.BoxPrompt)
+    assert prompt.box == [10.0, 10.0, 60.0, 70.0]
 
 
 def test_segment_uses_points_when_no_box(app_module: Any) -> None:
-    kind, flat = app_module.select_segmentation_mode([[1.0, 2.0, 1]], [])
-    assert kind == "points"
-    assert flat is None
+    prompts = app_module.ImagePrompts(point=app_module.PointPrompt(0, 0, [[1.0, 2.0]], [1]))
+    prompt = app_module.select_segmentation_mode(prompts)
+    assert isinstance(prompt, app_module.PointPrompt)
+
+
+def test_segment_returns_none_without_prompts(app_module: Any) -> None:
+    assert app_module.select_segmentation_mode(app_module.ImagePrompts()) is None
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +425,7 @@ def test_client_can_run_auto_segment(served_demo: Any, sample_rgb: np.ndarray) -
 
 @pytest.mark.slow
 def test_upload_endpoint_resets_prompts_and_returns_instruction(
-    served_demo: Any, sample_rgb: np.ndarray
+    served_demo: Any, app_module: Any, sample_rgb: np.ndarray
 ) -> None:
     """Uploading an image resets the click instruction to the foreground mode.
 
@@ -426,12 +438,19 @@ def test_upload_endpoint_resets_prompts_and_returns_instruction(
     tmp = REPO_ROOT / ".pytest_demo_upload.png"
     try:
         Image.fromarray(sample_rgb).save(tmp)
-        instruction = served_demo.predict(handle_file(str(tmp)), api_name="/_on_image_upload")
+        result = served_demo.predict(
+            handle_file(str(tmp)),
+            app_module.MODE_FOREGROUND,
+            api_name="/_on_image_upload",
+        )
+        instruction = result[-1] if isinstance(result, tuple) else result
         assert "foreground" in instruction
     finally:
         tmp.unlink(missing_ok=True)
 
 
-def test_thread_safety_lock_exists(app_module: Any) -> None:
-    """Model access is serialised; SAM 2 predictors are not thread-safe."""
-    assert isinstance(app_module._MODEL_LOCK, type(threading.Lock()))
+def test_thread_safety_locks_exist(app_module: Any) -> None:
+    """Model loading and inference are serialised; SAM 2 predictors are not thread-safe."""
+    lock_type = type(threading.Lock())
+    assert isinstance(app_module._MODEL_LOAD_LOCK, lock_type)
+    assert isinstance(app_module._INFERENCE_LOCK, lock_type)
