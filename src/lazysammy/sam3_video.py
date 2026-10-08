@@ -40,7 +40,7 @@ from lazysammy.validation import (
     validate_points_and_labels,
     validate_positive_int,
 )
-from lazysammy.video import _BaseVideoSession
+from lazysammy.video import BaseVideoSession
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +159,7 @@ class SAM3VideoTracker:
         return self._predictor
 
 
-class SAM3VideoSession(_BaseVideoSession):
+class SAM3VideoSession(BaseVideoSession):
     """A SAM 3 tracking session on one video.
 
     Returned by :meth:`SAM3VideoTracker.new_session`. Add text, point, or box
