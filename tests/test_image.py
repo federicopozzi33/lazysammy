@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from lazysammy.image import ImageSegmenter
+from lazysammy.utils import ImageEmbeddingCache
 
 
 class _DummyPredictor:
@@ -42,9 +43,7 @@ class TestSegmentMultiBox:
         segmenter = ImageSegmenter.__new__(ImageSegmenter)
         segmenter._device = torch.device("cpu")
         segmenter._dtype = torch.bfloat16
-        segmenter._cached_image_key = None
-        segmenter._cached_image_shape = None
-        segmenter._cached_image_ref = None
+        segmenter._image_cache = ImageEmbeddingCache()
         predictor = _DummyPredictor()
         segmenter._predictor = predictor
 
@@ -71,9 +70,7 @@ class TestSegmentMultiBox:
         segmenter = ImageSegmenter.__new__(ImageSegmenter)
         segmenter._device = torch.device("cpu")
         segmenter._dtype = torch.bfloat16
-        segmenter._cached_image_key = None
-        segmenter._cached_image_shape = None
-        segmenter._cached_image_ref = None
+        segmenter._image_cache = ImageEmbeddingCache()
         segmenter._predictor = _DummyPredictor()
 
         image = np.zeros((8, 8, 3), dtype=np.uint8)
@@ -102,9 +99,7 @@ class _CountingPredictor:
 def _counting_segmenter() -> tuple[ImageSegmenter, _CountingPredictor]:
     segmenter = ImageSegmenter.__new__(ImageSegmenter)
     segmenter._device = torch.device("cpu")
-    segmenter._cached_image_key = None
-    segmenter._cached_image_shape = None
-    segmenter._cached_image_ref = None
+    segmenter._image_cache = ImageEmbeddingCache()
     predictor = _CountingPredictor()
     segmenter._predictor = predictor
     return segmenter, predictor

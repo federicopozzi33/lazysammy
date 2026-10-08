@@ -21,7 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     unique object id.
   - `ConceptSegmenter` and `SAM3VideoTracker` are the underlying components;
     `ConceptPrediction` is the new result type (masks + boxes + concept).
-  - `ModelFamily` enum distinguishes SAM 2 from SAM 3.
   - `save_concept_prediction()` writes concept masks to disk.
 - The example notebook gains a SAM 3 section (open-vocabulary concept
   segmentation and video tracking), guarded by an availability check so it is

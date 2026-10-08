@@ -24,25 +24,12 @@ class ModelSize(str, Enum):
     LARGE = "large"
 
 
-class ModelFamily(str, Enum):
-    """Which SAM generation a wrapper targets.
-
-    SAM 2 is promptable with points, boxes, and masks. SAM 3 adds
-    open-vocabulary *concept* prompts (text or image exemplars) and can
-    exhaustively segment every instance of a concept.
-    """
-
-    SAM2 = "sam2"
-    SAM3 = "sam3"
-
-
 class PromptType(str, Enum):
     """Types of prompts that can be used for segmentation."""
 
     POINT = "point"
     BOX = "box"
     MASK = "mask"
-    TEXT = "text"
 
 
 # ---------------------------------------------------------------------------
@@ -669,12 +656,6 @@ class VideoResults:
 # SAM 3 concept segmentation
 # ---------------------------------------------------------------------------
 
-# HuggingFace repo hosting the SAM 3 checkpoints. Access must be requested on
-# the Hub before the weights can be downloaded.
-SAM3_HF_REPO = "facebook/sam3"
-# SAM 3.1 (Object Multiplex) checkpoints.
-SAM3_1_HF_REPO = "facebook/sam3.1"
-
 
 @dataclass
 class ConceptPrediction:
@@ -726,15 +707,16 @@ class ConceptPrediction:
         return np.stack([m.data for m in self.masks])
 
     def filter_by_score(self, min_score: float) -> ConceptPrediction:
-        """Return a new prediction keeping only instances above *min_score*."""
-        kept = [
-            (mask, box)
-            for mask, box in zip(self.masks, self.boxes, strict=False)
-            if mask.score >= min_score
-        ]
+        """Return a new prediction keeping only instances above *min_score*.
+
+        Boxes are optional (the interactive path produces masks without boxes),
+        so they are carried through by index rather than zipped: a prediction
+        with masks but no boxes still filters correctly.
+        """
+        keep = [i for i, mask in enumerate(self.masks) if mask.score >= min_score]
         return ConceptPrediction(
-            masks=[mask for mask, _ in kept],
-            boxes=[box for _, box in kept],
+            masks=[self.masks[i] for i in keep],
+            boxes=[self.boxes[i] for i in keep if i < len(self.boxes)],
             concept=self.concept,
             image_shape=self.image_shape,
         )

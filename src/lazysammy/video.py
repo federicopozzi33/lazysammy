@@ -26,6 +26,7 @@ from lazysammy.utils import (
     extract_frames,
     is_video_file,
     list_frame_files,
+    load_image,
 )
 from lazysammy.validation import (
     normalize_box,
@@ -163,7 +164,156 @@ class VideoTracker:
         return self._predictor
 
 
-class VideoSession:
+class _BaseVideoSession:
+    """Shared session surface for SAM 2 and SAM 3 video tracking.
+
+    Owns the frame bookkeeping, results access, and the save/overlay helpers so
+    the two backends do not duplicate them. Subclasses supply the prompt adders
+    and the propagation call for their predictor.
+    """
+
+    def __init__(
+        self,
+        *,
+        video_dir: Path,
+        num_frames: int,
+        frame_files: list[Path],
+        device: torch.device,
+    ) -> None:
+        self._video_dir = video_dir
+        self._num_frames = num_frames
+        self._frame_files = frame_files
+        self._device = device
+        self._results: VideoResults | None = None
+
+    # ------------------------------------------------------------------
+    # Results access
+    # ------------------------------------------------------------------
+
+    @property
+    def results(self) -> VideoResults | None:
+        """The latest propagation results, or ``None`` if not yet propagated."""
+        return self._results
+
+    @property
+    def num_frames(self) -> int:
+        """Total number of frames in the video."""
+        return self._num_frames
+
+    @property
+    def device(self) -> torch.device:
+        """Device used by this session."""
+        return self._device
+
+    @property
+    def video_dir(self) -> Path:
+        """Path to the frame directory."""
+        return self._video_dir
+
+    def get_frame(self, frame_idx: int) -> npt.NDArray[np.uint8]:
+        """Load a frame as an RGB numpy array.
+
+        Args:
+            frame_idx: Zero-based frame index.
+
+        Returns:
+            ``(H, W, 3)`` RGB uint8 array.
+        """
+        validate_frame_index(frame_idx, self._num_frames)
+        return load_image(self._frame_files[frame_idx])
+
+    # ------------------------------------------------------------------
+    # Save
+    # ------------------------------------------------------------------
+
+    def save(
+        self,
+        output_dir: str | Path,
+        *,
+        fmt: str = "png",
+        results: VideoResults | None = None,
+    ) -> Path:
+        """Save tracking results to disk.
+
+        Args:
+            output_dir: Output directory.
+            fmt: ``"png"``, ``"npy"``, or ``"coco_rle"``.
+            results: Explicit results to save; defaults to the last propagation.
+
+        Returns:
+            Path to the output directory.
+
+        Raises:
+            RuntimeError: If no results are available.
+        """
+        res = results or self._results
+        if res is None:
+            msg = "No results to save. Call propagate() first."
+            raise RuntimeError(msg)
+        return save_video_results(res, output_dir, fmt=fmt)
+
+    def save_overlay(
+        self,
+        output_path: str | Path,
+        *,
+        results: VideoResults | None = None,
+        fps: float = 24.0,
+        alpha: float = 0.5,
+        draw_contours: bool = True,
+        show_ids: bool = True,
+        show_frame_number: bool = True,
+        codec: str = "mp4v",
+        as_frames: bool = False,
+    ) -> Path:
+        """Save an overlay video (MP4) or overlay frame PNGs.
+
+        Args:
+            output_path: Output file path (``.mp4``) or directory (when
+                ``as_frames=True``).
+            results: Explicit results; defaults to the last propagation.
+            fps: Video frame rate (ignored when ``as_frames=True``).
+            alpha: Mask overlay transparency.
+            draw_contours: Draw mask contour lines.
+            show_ids: Annotate object IDs on the overlay.
+            show_frame_number: Burn frame index (video only).
+            codec: FourCC codec for MP4 writing.
+            as_frames: Save individual PNG frames instead of an MP4.
+
+        Returns:
+            Path to the output file or directory.
+
+        Raises:
+            RuntimeError: If no results are available.
+        """
+        from lazysammy.visualization import save_video_overlay, save_video_overlay_mp4
+
+        res = results or self._results
+        if res is None:
+            msg = "No results to save. Call propagate() first."
+            raise RuntimeError(msg)
+
+        if as_frames:
+            return save_video_overlay(
+                self._video_dir,
+                res,
+                output_path,
+                alpha=alpha,
+                draw_contours=draw_contours,
+            )
+        return save_video_overlay_mp4(
+            self._video_dir,
+            res,
+            output_path,
+            fps=fps,
+            alpha=alpha,
+            draw_contours=draw_contours,
+            show_ids=show_ids,
+            show_frame_number=show_frame_number,
+            codec=codec,
+        )
+
+
+class VideoSession(_BaseVideoSession):
     """A tracking session on one video.
 
     This object is returned by :meth:`VideoTracker.new_session` and provides
@@ -179,13 +329,14 @@ class VideoSession:
         frame_files: list[Path],
         device: torch.device,
     ) -> None:
+        super().__init__(
+            video_dir=video_dir,
+            num_frames=num_frames,
+            frame_files=frame_files,
+            device=device,
+        )
         self._predictor = predictor
         self._state = inference_state
-        self._video_dir = video_dir
-        self._num_frames = num_frames
-        self._frame_files = frame_files
-        self._device = device
-        self._results: VideoResults | None = None
 
     # ------------------------------------------------------------------
     # Prompt adders
@@ -389,134 +540,6 @@ class VideoSession:
             self._predictor.reset_state(self._state)
         self._results = None
         logger.info("Session reset")
-
-    # ------------------------------------------------------------------
-    # Results access
-    # ------------------------------------------------------------------
-
-    @property
-    def results(self) -> VideoResults | None:
-        """The latest propagation results, or ``None`` if not yet propagated."""
-        return self._results
-
-    @property
-    def num_frames(self) -> int:
-        """Total number of frames in the video."""
-        return self._num_frames
-
-    @property
-    def device(self) -> torch.device:
-        """Device used by this session."""
-        return self._device
-
-    @property
-    def video_dir(self) -> Path:
-        """Path to the frame directory."""
-        return self._video_dir
-
-    def get_frame(self, frame_idx: int) -> npt.NDArray[np.uint8]:
-        """Load a frame as an RGB numpy array.
-
-        Args:
-            frame_idx: Zero-based frame index.
-
-        Returns:
-            ``(H, W, 3)`` RGB uint8 array.
-        """
-        from lazysammy.utils import load_image
-
-        validate_frame_index(frame_idx, self._num_frames)
-        return load_image(self._frame_files[frame_idx])
-
-    # ------------------------------------------------------------------
-    # Save
-    # ------------------------------------------------------------------
-
-    def save(
-        self,
-        output_dir: str | Path,
-        *,
-        fmt: str = "png",
-        results: VideoResults | None = None,
-    ) -> Path:
-        """Save tracking results to disk.
-
-        Args:
-            output_dir: Output directory.
-            fmt: ``"png"``, ``"npy"``, or ``"coco_rle"``.
-            results: Explicit results to save; defaults to the last propagation.
-
-        Returns:
-            Path to the output directory.
-
-        Raises:
-            RuntimeError: If no results are available.
-        """
-        res = results or self._results
-        if res is None:
-            msg = "No results to save. Call propagate() first."
-            raise RuntimeError(msg)
-        return save_video_results(res, output_dir, fmt=fmt)
-
-    def save_overlay(
-        self,
-        output_path: str | Path,
-        *,
-        results: VideoResults | None = None,
-        fps: float = 24.0,
-        alpha: float = 0.5,
-        draw_contours: bool = True,
-        show_ids: bool = True,
-        show_frame_number: bool = True,
-        codec: str = "mp4v",
-        as_frames: bool = False,
-    ) -> Path:
-        """Save an overlay video (MP4) or overlay frame PNGs.
-
-        Args:
-            output_path: Output file path (``.mp4``) or directory (when
-                ``as_frames=True``).
-            results: Explicit results; defaults to the last propagation.
-            fps: Video frame rate (ignored when ``as_frames=True``).
-            alpha: Mask overlay transparency.
-            draw_contours: Draw mask contour lines.
-            show_ids: Annotate object IDs on the overlay.
-            show_frame_number: Burn frame index (video only).
-            codec: FourCC codec for MP4 writing.
-            as_frames: Save individual PNG frames instead of an MP4.
-
-        Returns:
-            Path to the output file or directory.
-
-        Raises:
-            RuntimeError: If no results are available.
-        """
-        from lazysammy.visualization import save_video_overlay, save_video_overlay_mp4
-
-        res = results or self._results
-        if res is None:
-            msg = "No results to save. Call propagate() first."
-            raise RuntimeError(msg)
-
-        if as_frames:
-            return save_video_overlay(
-                self._video_dir,
-                res,
-                output_path,
-                alpha=alpha,
-                draw_contours=draw_contours,
-            )
-        return save_video_overlay_mp4(
-            self._video_dir,
-            res,
-            output_path,
-            fps=fps,
-            alpha=alpha,
-            draw_contours=draw_contours,
-            show_ids=show_ids,
-            show_frame_number=show_frame_number,
-            codec=codec,
-        )
 
     # ------------------------------------------------------------------
     # Internal

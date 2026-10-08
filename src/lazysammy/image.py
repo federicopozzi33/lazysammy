@@ -22,6 +22,7 @@ from lazysammy.types import (
     PointLabels,
 )
 from lazysammy.utils import (
+    ImageEmbeddingCache,
     auto_detect_device,
     autocast,
     load_image,
@@ -74,13 +75,8 @@ class ImageSegmenter:
         )
         self._device = torch.device(auto_detect_device(device))
         # Cache the encoded image so repeated prompts on the same image skip
-        # the (expensive) image encoder. Keyed by identity for arrays and by
-        # path + mtime + size for files.
-        self._cached_image_key: Any = None
-        self._cached_image_shape: tuple[int, int] | None = None
-        # Keep a reference to a cached array so its ``id`` cannot be recycled
-        # by the allocator while the cache still points at it.
-        self._cached_image_ref: npt.NDArray[np.uint8] | None = None
+        # the (expensive) image encoder.
+        self._image_cache = ImageEmbeddingCache()
 
     # ------------------------------------------------------------------
     # Configuration accessors
@@ -100,24 +96,6 @@ class ImageSegmenter:
     # Image encoding (set once, prompt many)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _image_key(image: str | Path | npt.NDArray[np.uint8]) -> Any:
-        """Build a cache key identifying *image* without hashing its pixels.
-
-        Arrays are keyed by identity (``id``) plus shape/dtype. The segmenter
-        holds a reference to the cached array, so its id cannot be recycled
-        while cached. Mutating an array in place is *not* detected: pass a new
-        array to invalidate the cache.
-        """
-        if isinstance(image, np.ndarray):
-            return ("array", image.shape, image.dtype.str, id(image))
-        p = Path(image)
-        try:
-            stat = p.stat()
-        except OSError:
-            return ("path", str(p), None, None)
-        return ("path", str(p.resolve()), stat.st_mtime_ns, stat.st_size)
-
     def set_image(self, image: str | Path | npt.NDArray[np.uint8]) -> tuple[int, int]:
         """Encode an image once so repeated prompts reuse the embedding.
 
@@ -134,16 +112,15 @@ class ImageSegmenter:
         img = load_image(image)
         with torch.inference_mode(), autocast(self._device):
             self._predictor.set_image(img)
-        self._cached_image_key = self._image_key(image)
-        self._cached_image_shape = img.shape[:2]
-        self._cached_image_ref = image if isinstance(image, np.ndarray) else None
+        self._image_cache.store(image, img.shape[:2])
         return img.shape[:2]
 
     def _ensure_image(self, image: str | Path | npt.NDArray[np.uint8]) -> tuple[int, int]:
         """Encode *image* unless the same image is already cached."""
-        key = self._image_key(image)
-        if key == self._cached_image_key and self._cached_image_shape is not None:
-            return self._cached_image_shape
+        if self._image_cache.matches(image):
+            shape = self._image_cache.shape
+            assert shape is not None
+            return shape
         return self.set_image(image)
 
     # ------------------------------------------------------------------
@@ -294,7 +271,8 @@ class ImageSegmenter:
         Raises:
             RuntimeError: If no image has been set with :meth:`set_image`.
         """
-        if self._cached_image_shape is None:
+        image_shape = self._image_cache.shape
+        if image_shape is None:
             msg = "No image is set. Call set_image(image) before predict()."
             raise RuntimeError(msg)
 
@@ -305,7 +283,7 @@ class ImageSegmenter:
             mask_input=mask_input,
         )
         return self._predict_prompts(
-            image_shape=self._cached_image_shape,
+            image_shape=image_shape,
             points=points,
             labels=labels,
             box=box,
