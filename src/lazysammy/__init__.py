@@ -23,10 +23,12 @@ Quick start::
 from __future__ import annotations
 
 from lazysammy.auto_mask import AutoSegmenter
+from lazysammy.concept import ConceptSegmenter
 from lazysammy.image import ImageSegmenter
 from lazysammy.io import (
     SaveFormat,
     save_auto_mask_result,
+    save_concept_prediction,
     save_image_prediction,
     save_video_results,
 )
@@ -38,13 +40,17 @@ from lazysammy.prompts import (
     preview_frame,
 )
 from lazysammy.sam2 import SAM2
+from lazysammy.sam3 import SAM3
+from lazysammy.sam3_video import SAM3VideoSession, SAM3VideoTracker
 from lazysammy.types import (
     AutoMask,
     AutoMaskResult,
     BoundingBox,
+    ConceptPrediction,
     FrameMasks,
     ImagePrediction,
     Mask,
+    ModelFamily,
     ModelSize,
     PointCoords,
     PointLabels,
@@ -81,18 +87,24 @@ __version__ = "0.1.0"
 
 __all__ = [
     "SAM2",
+    "SAM3",
     "AutoMask",
     "AutoMaskResult",
     "AutoSegmenter",
     "BoundingBox",
+    "ConceptPrediction",
+    "ConceptSegmenter",
     "FrameMasks",
     "ImagePrediction",
     "ImageSegmenter",
     "Mask",
+    "ModelFamily",
     "ModelSize",
     "PointCoords",
     "PointLabels",
     "PromptPicker",
+    "SAM3VideoSession",
+    "SAM3VideoTracker",
     "SaveFormat",
     "VideoResults",
     "VideoSession",
@@ -116,6 +128,7 @@ __all__ = [
     "preview_frame",
     "rle_to_mask",
     "save_auto_mask_result",
+    "save_concept_prediction",
     "save_image_prediction",
     "save_masks_as_coco_rle",
     "save_masks_as_npy",

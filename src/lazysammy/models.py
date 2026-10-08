@@ -266,3 +266,86 @@ def load_auto_mask_generator(
         use_m2m=use_m2m,
         **kwargs,
     )
+
+
+# ---------------------------------------------------------------------------
+# SAM 3 builders
+# ---------------------------------------------------------------------------
+
+
+def _sam3_bpe_path() -> str:
+    """Return the bundled BPE vocabulary path shipped with the ``sam3`` package."""
+    import sam3
+
+    return str(Path(sam3.__file__).parent / "assets" / "bpe_simple_vocab_16e6.txt.gz")
+
+
+def load_sam3_image_model(
+    *,
+    checkpoint: str | Path | None = None,
+    device: str | None = None,
+    enable_instance_interactivity: bool = True,
+    compile: bool = False,
+    **kwargs: Any,
+) -> Any:
+    """Build a SAM 3 image model (``Sam3Image``).
+
+    Args:
+        checkpoint: Optional local checkpoint path. When ``None`` the weights
+            are downloaded from the ``facebook/sam3`` HuggingFace repo (access
+            must be requested first).
+        device: Device string override (auto-detected if ``None``).
+        enable_instance_interactivity: Also build the SAM 1/2-style interactive
+            predictor so point/box/mask prompts work alongside text prompts.
+        compile: Enable ``torch.compile`` on the model components.
+        **kwargs: Extra arguments forwarded to ``build_sam3_image_model``.
+
+    Returns:
+        An initialised ``Sam3Image`` model.
+    """
+    from sam3.model_builder import build_sam3_image_model
+
+    dev = auto_detect_device(device)
+    logger.info("Loading SAM3 image model (device=%s)", dev)
+    return build_sam3_image_model(
+        bpe_path=_sam3_bpe_path(),
+        device=dev,
+        checkpoint_path=str(checkpoint) if checkpoint is not None else None,
+        enable_inst_interactivity=enable_instance_interactivity,
+        compile=compile,
+        **kwargs,
+    )
+
+
+def load_sam3_video_predictor(
+    *,
+    checkpoint: str | Path | None = None,
+    device: str | None = None,
+    version: str = "sam3",
+    compile: bool = False,
+    **kwargs: Any,
+) -> Any:
+    """Build a SAM 3 video predictor with the ``handle_request`` API.
+
+    Args:
+        checkpoint: Optional local checkpoint path.
+        device: Device string override (auto-detected if ``None``).
+        version: ``"sam3"`` for the base model or ``"sam3.1"`` for the
+            Object Multiplex variant.
+        compile: Enable ``torch.compile`` (SAM 3.1 only).
+        **kwargs: Extra arguments forwarded to ``build_sam3_predictor``.
+
+    Returns:
+        A predictor exposing ``handle_request`` / ``handle_stream_request``.
+    """
+    from sam3.model_builder import build_sam3_predictor
+
+    dev = auto_detect_device(device)
+    logger.info("Loading SAM3 video predictor (version=%s, device=%s)", version, dev)
+    return build_sam3_predictor(
+        checkpoint_path=str(checkpoint) if checkpoint is not None else None,
+        bpe_path=_sam3_bpe_path(),
+        version=version,
+        compile=compile,
+        **kwargs,
+    )

@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
-from lazysammy.types import AutoMaskResult, ImagePrediction, VideoResults
+from lazysammy.types import AutoMaskResult, ConceptPrediction, ImagePrediction, VideoResults
 from lazysammy.utils import (
     save_masks_as_coco_rle,
     save_masks_as_npy,
@@ -106,6 +106,26 @@ def save_auto_mask_result(
         Path to the output directory.
     """
     masks_dict = {f"auto_mask_{i:04d}": m.data for i, m in enumerate(result.masks)}
+    return _save_mask_mapping(masks_dict, output_dir, fmt=fmt)
+
+
+def save_concept_prediction(
+    prediction: ConceptPrediction,
+    output_dir: str | Path,
+    *,
+    fmt: str | SaveFormat = SaveFormat.PNG,
+) -> Path:
+    """Save a SAM 3 concept prediction to disk.
+
+    Args:
+        prediction: The concept prediction whose instance masks should be written.
+        output_dir: Target directory (created if needed).
+        fmt: ``"png"``, ``"npy"``, or ``"coco_rle"``.
+
+    Returns:
+        Path to the output directory.
+    """
+    masks_dict = {f"instance_{i:04d}": m.data for i, m in enumerate(prediction.masks)}
     return _save_mask_mapping(masks_dict, output_dir, fmt=fmt)
 
 

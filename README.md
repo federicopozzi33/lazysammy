@@ -183,6 +183,7 @@ Optional extras:
 uv sync --extra viz       # matplotlib visualisation helpers
 uv sync --extra notebook  # jupyterlab + ipympl (for interactive clicking)
 uv sync --extra demo      # gradio demo app
+uv sync --extra sam3      # SAM 3 open-vocabulary segmentation (Python 3.12+)
 uv sync --extra all       # everything above
 ```
 
@@ -241,6 +242,38 @@ print(len(auto))                        # number of masks found
 good = auto.filter_by_iou(min_iou=0.9)  # keep confident masks
 sam.save(good, "output/auto_masks/")
 ```
+
+### Segment by concept (SAM 3)
+
+SAM 3 adds open-vocabulary *concept* prompts: describe what you want in words
+and it segments every matching instance. Install the optional extra first:
+
+```bash
+pip install "lazysammy[sam3]"
+```
+
+```python
+from lazysammy import SAM3
+
+sam = SAM3()  # downloads facebook/sam3 (request access on HuggingFace first)
+
+# Every instance of a text concept
+pred = sam.segment_text("photo.jpg", "a player in white")
+for mask, box in zip(pred.masks, pred.boxes):
+    print(mask.score, box)
+
+# Every instance matching a box exemplar
+pred = sam.segment_exemplar("photo.jpg", [120, 80, 300, 400])
+
+# Track a concept through a video (each instance gets its own object id)
+session = sam.video("clip.mp4")
+session.add_text(frame_idx=0, text="person")
+results = session.propagate()
+session.save_overlay("output/tracked.mp4")
+```
+
+The geometric-prompt API is unchanged, so `SAM3` is a drop-in for `SAM2` when
+you only need points, boxes, and masks.
 
 ---
 
@@ -315,8 +348,11 @@ session.reset()                                     # start over
 | Multiple objects by points | `sam.segment_multi_point(...)` | `list[ImagePrediction]` |
 | Refinement | `sam.refine(...)` | `ImagePrediction` |
 | Auto-segmentation | `sam.auto_segment(...)` | `AutoMaskResult` |
+| Concept segmentation (SAM 3) | `sam.segment_text(image, text)` | `ConceptPrediction` |
+| Exemplar segmentation (SAM 3) | `sam.segment_exemplar(image, box)` | `ConceptPrediction` |
 | Start a video session | `sam.video(...)` | `VideoSession` |
 | Propagate | `session.propagate(...)` | `VideoResults` |
+| Track a concept (SAM 3) | `session.add_text(frame_idx, text)` | `FrameMasks` |
 | Save any image result | `sam.save(result, dir, fmt=...)` | output path |
 | Save video results | `session.save(dir, fmt=...)` | output path |
 
@@ -330,13 +366,22 @@ Every result is a typed dataclass you can inspect, iterate, and serialise.
 |------|-------------|
 | `Mask` | Binary mask with `.score`, `.area`, `.logits`, `.bbox`, `.centroid`, `.iou()`, `.numpy()`, `.as_uint8()`, `.to_rle()`, `.save()` |
 | `ImagePrediction` | Masks from one image call; iterable, indexable, `.best_mask` is the highest-scoring one |
+| `ConceptPrediction` | SAM 3 concept result: one mask + box per detected instance, plus `.concept` and `.filter_by_score()` |
 | `AutoMask` | One auto-generated mask with area, bbox, and stability score |
 | `AutoMaskResult` | Iterable collection with `.filter_by_area()` / `.filter_by_iou()` / `.sort_by()` |
 | `FrameMasks` | Object masks for one video frame; `.object_ids`, `.masks` |
 | `VideoResults` | Full tracked sequence; iterable, indexable, sliceable, `.get_object_masks()` |
 
 ```python
-from lazysammy import AutoMask, AutoMaskResult, FrameMasks, ImagePrediction, Mask, VideoResults
+from lazysammy import (
+    AutoMask,
+    AutoMaskResult,
+    ConceptPrediction,
+    FrameMasks,
+    ImagePrediction,
+    Mask,
+    VideoResults,
+)
 ```
 
 Masks support set operations and geometry directly:
