@@ -50,11 +50,6 @@ class ImageSegmenter:
         best = result.best_mask
     """
 
-    # Class-level defaults so instances created via ``__new__`` (e.g. in tests)
-    # still have a usable image cache.
-    _cached_image_key: Any = None
-    _cached_image_shape: tuple[int, int] | None = None
-
     def __init__(
         self,
         model_size: str | ModelSize = "large",
@@ -83,6 +78,9 @@ class ImageSegmenter:
         # path + mtime + size for files.
         self._cached_image_key: Any = None
         self._cached_image_shape: tuple[int, int] | None = None
+        # Keep a reference to a cached array so its ``id`` cannot be recycled
+        # by the allocator while the cache still points at it.
+        self._cached_image_ref: npt.NDArray[np.uint8] | None = None
 
     # ------------------------------------------------------------------
     # Configuration accessors
@@ -104,7 +102,13 @@ class ImageSegmenter:
 
     @staticmethod
     def _image_key(image: str | Path | npt.NDArray[np.uint8]) -> Any:
-        """Build a cache key identifying *image* without hashing its pixels."""
+        """Build a cache key identifying *image* without hashing its pixels.
+
+        Arrays are keyed by identity (``id``) plus shape/dtype. The segmenter
+        holds a reference to the cached array, so its id cannot be recycled
+        while cached. Mutating an array in place is *not* detected: pass a new
+        array to invalidate the cache.
+        """
         if isinstance(image, np.ndarray):
             return ("array", image.shape, image.dtype.str, id(image))
         p = Path(image)
@@ -132,6 +136,7 @@ class ImageSegmenter:
             self._predictor.set_image(img)
         self._cached_image_key = self._image_key(image)
         self._cached_image_shape = img.shape[:2]
+        self._cached_image_ref = image if isinstance(image, np.ndarray) else None
         return img.shape[:2]
 
     def _ensure_image(self, image: str | Path | npt.NDArray[np.uint8]) -> tuple[int, int]:
@@ -170,6 +175,52 @@ class ImageSegmenter:
         ]
         return ImagePrediction(masks=mask_objs, image_shape=image_shape)
 
+    def _predict_prompts(
+        self,
+        *,
+        image_shape: tuple[int, int],
+        points: PointCoords | None,
+        labels: PointLabels | None,
+        box: BoundingBox | None,
+        mask_input: MaskLogits | None,
+        multimask_output: bool,
+        return_logits: bool,
+    ) -> ImagePrediction:
+        """Run already-validated prompts through the predictor.
+
+        Shared by :meth:`segment`, :meth:`predict`, and the multi-object
+        helpers so the mask-input normalization and inference wrapper live in
+        exactly one place.
+        """
+        # SAM2's ``_prep_prompts`` only adds a batch dimension to 3D mask
+        # logits, so a bare 2D ``(H, W)`` mask must be promoted to
+        # ``(1, H, W)`` here to avoid a shape error deep in the model.
+        mask_input_norm = mask_input
+        if mask_input_norm is not None and mask_input_norm.ndim == 2:
+            mask_input_norm = mask_input_norm[None, :, :]
+
+        with torch.inference_mode(), autocast(self._device):
+            pt = np.array(points, dtype=np.float32) if points is not None else None
+            lb = np.array(labels, dtype=np.int32) if labels is not None else None
+            bx = normalize_box(box) if box is not None else None
+
+            masks_np, scores_np, logits_np = self._predictor.predict(
+                point_coords=pt,
+                point_labels=lb,
+                box=bx,
+                mask_input=mask_input_norm,
+                multimask_output=multimask_output,
+                return_logits=return_logits,
+            )
+
+        return self._to_image_prediction(
+            masks_np,
+            scores_np,
+            logits_np,
+            image_shape=image_shape,
+            return_logits=return_logits,
+        )
+
     def segment(
         self,
         image: str | Path | npt.NDArray[np.uint8],
@@ -202,35 +253,14 @@ class ImageSegmenter:
             box=box,
             mask_input=mask_input,
         )
-
         image_shape = self._ensure_image(image)
-
-        # SAM2's ``_prep_prompts`` only adds a batch dimension to 3D mask
-        # logits, so a bare 2D ``(H, W)`` mask must be promoted to
-        # ``(1, H, W)`` here to avoid a shape error deep in the model.
-        mask_input_norm = mask_input
-        if mask_input_norm is not None and mask_input_norm.ndim == 2:
-            mask_input_norm = mask_input_norm[None, :, :]
-
-        with torch.inference_mode(), autocast(self._device):
-            pt = np.array(points, dtype=np.float32) if points is not None else None
-            lb = np.array(labels, dtype=np.int32) if labels is not None else None
-            bx = normalize_box(box) if box is not None else None
-
-            masks_np, scores_np, logits_np = self._predictor.predict(
-                point_coords=pt,
-                point_labels=lb,
-                box=bx,
-                mask_input=mask_input_norm,
-                multimask_output=multimask_output,
-                return_logits=return_logits,
-            )
-
-        return self._to_image_prediction(
-            masks_np,
-            scores_np,
-            logits_np,
+        return self._predict_prompts(
             image_shape=image_shape,
+            points=points,
+            labels=labels,
+            box=box,
+            mask_input=mask_input,
+            multimask_output=multimask_output,
             return_logits=return_logits,
         )
 
@@ -274,30 +304,13 @@ class ImageSegmenter:
             box=box,
             mask_input=mask_input,
         )
-
-        mask_input_norm = mask_input
-        if mask_input_norm is not None and mask_input_norm.ndim == 2:
-            mask_input_norm = mask_input_norm[None, :, :]
-
-        with torch.inference_mode(), autocast(self._device):
-            pt = np.array(points, dtype=np.float32) if points is not None else None
-            lb = np.array(labels, dtype=np.int32) if labels is not None else None
-            bx = normalize_box(box) if box is not None else None
-
-            masks_np, scores_np, logits_np = self._predictor.predict(
-                point_coords=pt,
-                point_labels=lb,
-                box=bx,
-                mask_input=mask_input_norm,
-                multimask_output=multimask_output,
-                return_logits=return_logits,
-            )
-
-        return self._to_image_prediction(
-            masks_np,
-            scores_np,
-            logits_np,
+        return self._predict_prompts(
             image_shape=self._cached_image_shape,
+            points=points,
+            labels=labels,
+            box=box,
+            mask_input=mask_input,
+            multimask_output=multimask_output,
             return_logits=return_logits,
         )
 
@@ -462,24 +475,18 @@ class ImageSegmenter:
         image_shape = self._ensure_image(image)
         results: list[ImagePrediction] = []
 
-        with torch.inference_mode(), autocast(self._device):
-            for bx in normalized_boxes:
-                masks_np, scores_np, logits_np = self._predictor.predict(
-                    point_coords=None,
-                    point_labels=None,
+        for bx in normalized_boxes:
+            results.append(
+                self._predict_prompts(
+                    image_shape=image_shape,
+                    points=None,
+                    labels=None,
                     box=bx,
                     mask_input=None,
                     multimask_output=False,
                     return_logits=False,
                 )
-                results.append(
-                    self._to_image_prediction(
-                        masks_np,
-                        scores_np,
-                        logits_np,
-                        image_shape=image_shape,
-                    )
-                )
+            )
         return results
 
     def segment_multi_point(
@@ -520,31 +527,25 @@ class ImageSegmenter:
         image_shape = self._ensure_image(image)
         results: list[ImagePrediction] = []
 
-        with torch.inference_mode(), autocast(self._device):
-            for idx, pts in enumerate(points_per_object):
-                labels = labels_per_object[idx] if labels_per_object is not None else [1] * len(pts)
-                try:
-                    validate_points_and_labels(pts, labels)
-                except ValueError as exc:
-                    msg = f"Invalid points for object index {idx}: {exc}"
-                    raise ValueError(msg) from exc
+        for idx, pts in enumerate(points_per_object):
+            labels = labels_per_object[idx] if labels_per_object is not None else [1] * len(pts)
+            try:
+                validate_points_and_labels(pts, labels)
+            except ValueError as exc:
+                msg = f"Invalid points for object index {idx}: {exc}"
+                raise ValueError(msg) from exc
 
-                masks_np, scores_np, logits_np = self._predictor.predict(
-                    point_coords=np.array(pts, dtype=np.float32),
-                    point_labels=np.array(labels, dtype=np.int32),
+            results.append(
+                self._predict_prompts(
+                    image_shape=image_shape,
+                    points=pts,
+                    labels=labels,
                     box=None,
                     mask_input=None,
                     multimask_output=multimask_output,
                     return_logits=False,
                 )
-                results.append(
-                    self._to_image_prediction(
-                        masks_np,
-                        scores_np,
-                        logits_np,
-                        image_shape=image_shape,
-                    )
-                )
+            )
         return results
 
     def refine(

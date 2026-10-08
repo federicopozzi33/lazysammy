@@ -159,29 +159,22 @@ def load_video_predictor(
     dev = torch.device(auto_detect_device(device))
     model_size_str = str(model_size)
 
-    if _is_hf_model_id(model_size_str):
-        from sam2.sam2_video_predictor import SAM2VideoPredictor
-
-        logger.info("Loading SAM2VideoPredictor from HuggingFace: %s", model_size_str)
-        return SAM2VideoPredictor.from_pretrained(
-            model_size_str, device=dev, vos_optimized=vos_optimized, **kwargs
-        )
-
-    size = resolve_model_size(model_size)
-
-    if checkpoint is not None:
+    if not _is_hf_model_id(model_size_str) and checkpoint is not None:
         from sam2.build_sam import build_sam2_video_predictor
 
-        cfg = CONFIG_FILENAMES[size]
+        cfg = CONFIG_FILENAMES[resolve_model_size(model_size)]
         logger.info("Loading SAM2VideoPredictor from checkpoint: %s", checkpoint)
         return build_sam2_video_predictor(
             cfg, str(checkpoint), device=str(dev), vos_optimized=vos_optimized, **kwargs
         )
 
-    # Default: use HuggingFace hub
+    # HuggingFace hub: either an explicit model id or the mapped default.
     from sam2.sam2_video_predictor import SAM2VideoPredictor
 
-    hf_id = HF_MODEL_IDS[size]
+    if _is_hf_model_id(model_size_str):
+        hf_id = model_size_str
+    else:
+        hf_id = HF_MODEL_IDS[resolve_model_size(model_size)]
     logger.info("Loading SAM2VideoPredictor from HuggingFace: %s", hf_id)
     return SAM2VideoPredictor.from_pretrained(
         hf_id, device=dev, vos_optimized=vos_optimized, **kwargs

@@ -12,7 +12,7 @@ import numpy as np
 import numpy.typing as npt
 
 from lazysammy.utils import mask_to_rle, rle_to_mask
-from lazysammy.validation import validate_nonempty_masks
+from lazysammy.validation import validate_nonempty_masks, validate_save_format
 
 
 class ModelSize(str, Enum):
@@ -209,8 +209,6 @@ class Mask:
 
     def to_rle(self) -> dict[str, Any]:
         """Encode the mask as a COCO-style RLE dict (``size`` + ``counts``)."""
-        from lazysammy.utils import mask_to_rle
-
         return mask_to_rle(self.data)
 
     @classmethod
@@ -221,8 +219,6 @@ class Mask:
         score: float = 0.0,
     ) -> Mask:
         """Decode a COCO-style RLE dict into a :class:`Mask`."""
-        from lazysammy.utils import rle_to_mask
-
         return cls(data=rle_to_mask(rle), score=score)
 
     def to_dict(self) -> dict[str, Any]:
@@ -273,7 +269,7 @@ class Mask:
                 )
                 raise ValueError(msg)
 
-        normalized = fmt.strip().lower()
+        normalized = validate_save_format(fmt)
         if normalized == "png":
             cv2.imwrite(str(p), self.as_uint8())
         elif normalized == "npy":
@@ -281,11 +277,8 @@ class Mask:
             # silently ignore the caller's chosen path.
             with open(p, "wb") as handle:
                 np.save(handle, self.data)
-        elif normalized == "coco_rle":
+        else:  # coco_rle
             p.write_text(json.dumps(self.to_rle()))
-        else:
-            msg = f"Unsupported mask format: {fmt!r}. Use 'png', 'npy', or 'coco_rle'."
-            raise ValueError(msg)
         return p
 
 
@@ -335,17 +328,14 @@ class ImagePrediction:
         """Serialise to a JSON-friendly dict (masks as COCO RLE)."""
         return {
             "image_shape": list(self.image_shape) if self.image_shape else None,
-            "masks": [{"score": m.score, "area": m.area, "rle": m.to_rle()} for m in self.masks],
+            "masks": [m.to_dict() for m in self.masks],
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ImagePrediction:
         """Reconstruct an :class:`ImagePrediction` from :meth:`to_dict` output."""
         shape = data.get("image_shape")
-        masks = [
-            Mask.from_rle(entry["rle"], score=float(entry["score"]))
-            for entry in data.get("masks", [])
-        ]
+        masks = [Mask.from_dict(entry) for entry in data.get("masks", [])]
         return cls(masks=masks, image_shape=tuple(shape) if shape else None)
 
 

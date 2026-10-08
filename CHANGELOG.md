@@ -53,6 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer builds an unused frame.
 - The Gradio demo's prompt bookkeeping and event handlers are now module-level
   functions instead of nested closures, so they can be unit-tested directly.
+- `ImageSegmenter.segment()`, `predict()`, and the multi-object helpers now
+  share one internal prediction path, so mask-input normalization and the
+  inference wrapper live in a single place.
+- `SAM2.auto_segment()` keys its tuned-segmenter cache with a frozen
+  `AutoSegmentSettings` dataclass instead of a positional tuple.
+- The demo's video prompts are typed `PointPrompt` / `BoxPrompt` objects rather
+  than `dict`s with a `"type"` string, so drawing, session application, and
+  summary rendering are polymorphic instead of re-branched per call site.
 
 ### Fixed
 

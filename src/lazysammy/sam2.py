@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,44 @@ from lazysammy.utils import auto_detect_device
 from lazysammy.video import VideoSession, VideoTracker
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AutoSegmentSettings:
+    """Tuning options for automatic mask generation.
+
+    Frozen (and therefore hashable) so it can key the cache of tuned
+    :class:`AutoSegmenter` instances without a positional tuple.
+    """
+
+    points_per_side: int = 32
+    pred_iou_thresh: float = 0.8
+    stability_score_thresh: float = 0.95
+    min_mask_region_area: int = 0
+    use_m2m: bool = False
+
+    @classmethod
+    def from_overrides(
+        cls,
+        *,
+        points_per_side: int | None = None,
+        pred_iou_thresh: float | None = None,
+        stability_score_thresh: float | None = None,
+        min_mask_region_area: int | None = None,
+        use_m2m: bool | None = None,
+    ) -> AutoSegmentSettings:
+        """Build settings from optional overrides, filling in defaults."""
+        overrides: dict[str, Any] = {}
+        for name, value in {
+            "points_per_side": points_per_side,
+            "pred_iou_thresh": pred_iou_thresh,
+            "stability_score_thresh": stability_score_thresh,
+            "min_mask_region_area": min_mask_region_area,
+            "use_m2m": use_m2m,
+        }.items():
+            if value is not None:
+                overrides[name] = value
+        return replace(cls(), **overrides)
 
 
 class SAM2:
@@ -85,7 +124,7 @@ class SAM2:
         self._auto_segmenter: AutoSegmenter | None = None
         # Cache of tuned auto-segmenters keyed by their settings, so repeated
         # calls with the same options do not reload the model weights.
-        self._tuned_auto_segmenters: dict[tuple[Any, ...], AutoSegmenter] = {}
+        self._tuned_auto_segmenters: dict[AutoSegmentSettings, AutoSegmenter] = {}
 
     # ------------------------------------------------------------------
     # Configuration accessors
@@ -459,33 +498,12 @@ class SAM2:
         ):
             return self.auto_segmenter.generate(image)
 
-        defaults = {
-            "points_per_side": 32,
-            "pred_iou_thresh": 0.8,
-            "stability_score_thresh": 0.95,
-            "min_mask_region_area": 0,
-            "use_m2m": False,
-        }
-        overrides: dict[str, Any] = dict(defaults)
-        overrides.update(
-            {
-                k: v
-                for k, v in {
-                    "points_per_side": points_per_side,
-                    "pred_iou_thresh": pred_iou_thresh,
-                    "stability_score_thresh": stability_score_thresh,
-                    "min_mask_region_area": min_mask_region_area,
-                    "use_m2m": use_m2m,
-                }.items()
-                if v is not None
-            }
-        )
-        settings = (
-            int(overrides["points_per_side"]),
-            float(overrides["pred_iou_thresh"]),
-            float(overrides["stability_score_thresh"]),
-            int(overrides["min_mask_region_area"]),
-            bool(overrides["use_m2m"]),
+        settings = AutoSegmentSettings.from_overrides(
+            points_per_side=points_per_side,
+            pred_iou_thresh=pred_iou_thresh,
+            stability_score_thresh=stability_score_thresh,
+            min_mask_region_area=min_mask_region_area,
+            use_m2m=use_m2m,
         )
         segmenter = self._tuned_auto_segmenters.get(settings)
         if segmenter is None:
@@ -493,11 +511,11 @@ class SAM2:
                 self._model_size,
                 checkpoint=self._checkpoint,
                 device=self._device,
-                points_per_side=settings[0],
-                pred_iou_thresh=settings[1],
-                stability_score_thresh=settings[2],
-                min_mask_region_area=settings[3],
-                use_m2m=settings[4],
+                points_per_side=settings.points_per_side,
+                pred_iou_thresh=settings.pred_iou_thresh,
+                stability_score_thresh=settings.stability_score_thresh,
+                min_mask_region_area=settings.min_mask_region_area,
+                use_m2m=settings.use_m2m,
             )
             self._tuned_auto_segmenters[settings] = segmenter
         return segmenter.generate(image)

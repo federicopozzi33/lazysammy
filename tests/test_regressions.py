@@ -201,6 +201,9 @@ class TestMaskInputNormalization:
 
         segmenter = ImageSegmenter.__new__(ImageSegmenter)
         segmenter._device = torch.device("cpu")
+        segmenter._cached_image_key = None
+        segmenter._cached_image_shape = None
+        segmenter._cached_image_ref = None
         segmenter._predictor = _Predictor()
 
         segmenter.segment(

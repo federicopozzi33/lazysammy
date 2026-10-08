@@ -15,8 +15,9 @@ import logging
 import os
 import tempfile
 import threading
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import cv2
 import gradio as gr
@@ -140,6 +141,98 @@ def _draw_box_corners_on_image(
         bx2, by2 = max(x1, x2), max(y1, y2)
         cv2.rectangle(out, (bx1, by1), (bx2, by2), (0, 200, 255), 2)
     return out
+
+
+def _draw_label(
+    img: np.ndarray,
+    text: str,
+    x: int,
+    y: int,
+    color: tuple[int, int, int],
+    *,
+    scale: float = 0.45,
+) -> None:
+    """Draw *text* with a white outline so it stays legible on any frame."""
+    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
+
+
+# ---------------------------------------------------------------------------
+# Video-tab prompt model
+#
+# Prompts are typed objects rather than ``dict``s with a ``"type"`` string, so
+# drawing, session application, and summary rendering are polymorphic instead
+# of re-branched on the type at every call site.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PointPrompt:
+    """One object's point prompts on a single frame."""
+
+    frame_idx: int
+    obj_id: int
+    points: list[list[float]]
+    labels: list[int]
+
+    def draw(self, img: np.ndarray, color: tuple[int, int, int]) -> None:
+        """Draw the points onto *img* in place."""
+        for pt, lab in zip(self.points, self.labels, strict=False):
+            x, y = int(pt[0]), int(pt[1])
+            point_color = color if lab == 1 else (128, 128, 128)
+            cv2.circle(img, (x, y), 7, point_color, -1)
+            cv2.circle(img, (x, y), 7, (255, 255, 255), 2)
+            tag = f"obj{self.obj_id}+" if lab == 1 else f"obj{self.obj_id}-"
+            _draw_label(img, tag, x + 10, y - 6, color)
+
+    def apply(self, session: Any) -> None:
+        """Register this prompt on a video tracking session."""
+        session.add_points(
+            frame_idx=self.frame_idx,
+            obj_id=self.obj_id,
+            points=self.points,
+            labels=self.labels,
+        )
+
+    def summary_html(self) -> str:
+        """Render the prompt body for the prompt-list summary."""
+        fg_tag = '<span style="color:green">fg</span>'
+        bg_tag = '<span style="color:red">bg</span>'
+        pts = ", ".join(
+            f"({pt[0]:.0f},{pt[1]:.0f}) {fg_tag if lb == 1 else bg_tag}"
+            for pt, lb in zip(self.points, self.labels, strict=False)
+        )
+        return f"Obj {self.obj_id} | Frame {self.frame_idx} | {pts}"
+
+
+@dataclass
+class BoxPrompt:
+    """One object's bounding-box prompt on a single frame."""
+
+    frame_idx: int
+    obj_id: int
+    box: list[float]
+
+    def draw(self, img: np.ndarray, color: tuple[int, int, int]) -> None:
+        """Draw the box onto *img* in place."""
+        bx = self.box
+        cv2.rectangle(img, (int(bx[0]), int(bx[1])), (int(bx[2]), int(bx[3])), color, 2)
+        _draw_label(img, f"obj{self.obj_id}", int(bx[0]) + 4, int(bx[1]) - 6, color, scale=0.5)
+
+    def apply(self, session: Any) -> None:
+        """Register this prompt on a video tracking session."""
+        session.add_box(frame_idx=self.frame_idx, obj_id=self.obj_id, box=self.box)
+
+    def summary_html(self) -> str:
+        """Render the prompt body for the prompt-list summary."""
+        b = self.box
+        return (
+            f"Obj {self.obj_id} | Frame {self.frame_idx} | "
+            f"box ({b[0]:.0f},{b[1]:.0f}) to ({b[2]:.0f},{b[3]:.0f})"
+        )
+
+
+VideoPrompt = PointPrompt | BoxPrompt
 
 
 # =========================================================================
@@ -290,7 +383,7 @@ def _get_frame_image(frame_files: list[str], frame_idx: int) -> np.ndarray | Non
 
 def _draw_video_prompts(
     frame: np.ndarray | None,
-    prompts: list[dict[str, Any]],
+    prompts: list[VideoPrompt],
     frame_idx: int,
 ) -> np.ndarray | None:
     """Draw all prompts for a given frame."""
@@ -298,72 +391,20 @@ def _draw_video_prompts(
         return None
     out = frame.copy()
     for prompt in prompts:
-        if prompt["frame_idx"] != frame_idx:
-            continue
-        color = _color_for_obj(prompt["obj_id"])
-        oid = prompt["obj_id"]
-        if prompt["type"] == "point":
-            for pt, lab in zip(prompt["points"], prompt["labels"], strict=False):
-                c = color if lab == 1 else (128, 128, 128)
-                cv2.circle(out, (int(pt[0]), int(pt[1])), 7, c, -1)
-                cv2.circle(out, (int(pt[0]), int(pt[1])), 7, (255, 255, 255), 2)
-                tag = f"obj{oid}+" if lab == 1 else f"obj{oid}-"
-                cv2.putText(
-                    out,
-                    tag,
-                    (int(pt[0]) + 10, int(pt[1]) - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (255, 255, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
-                cv2.putText(
-                    out,
-                    tag,
-                    (int(pt[0]) + 10, int(pt[1]) - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    color,
-                    1,
-                    cv2.LINE_AA,
-                )
-        elif prompt["type"] == "box":
-            bx = prompt["box"]
-            cv2.rectangle(out, (int(bx[0]), int(bx[1])), (int(bx[2]), int(bx[3])), color, 2)
-            cv2.putText(
-                out,
-                f"obj{oid}",
-                (int(bx[0]) + 4, int(bx[1]) - 6),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                out,
-                f"obj{oid}",
-                (int(bx[0]) + 4, int(bx[1]) - 6),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                color,
-                1,
-                cv2.LINE_AA,
-            )
+        if prompt.frame_idx == frame_idx:
+            prompt.draw(out, _color_for_obj(prompt.obj_id))
     return out
 
 
-def _format_prompts_html(prompts: list[dict]) -> str:
+def _format_prompts_html(prompts: list[VideoPrompt]) -> str:
     """Render prompts as styled HTML for the video tab summary."""
     if not prompts:
         return _NO_PROMPTS_HTML
 
-    # Gather stats
-    obj_ids = sorted({p["obj_id"] for p in prompts})
-    frames_used = sorted({p["frame_idx"] for p in prompts})
-    n_points = sum(len(p["points"]) for p in prompts if p["type"] == "point")
-    n_boxes = sum(1 for p in prompts if p["type"] == "box")
+    obj_ids = sorted({p.obj_id for p in prompts})
+    frames_used = sorted({p.frame_idx for p in prompts})
+    n_points = sum(len(p.points) for p in prompts if isinstance(p, PointPrompt))
+    n_boxes = sum(1 for p in prompts if isinstance(p, BoxPrompt))
 
     header = (
         f"<b>{len(obj_ids)} object(s)</b> | "
@@ -373,25 +414,12 @@ def _format_prompts_html(prompts: list[dict]) -> str:
 
     rows = []
     for p in prompts:
-        color = "#{:02x}{:02x}{:02x}".format(*_color_for_obj(p["obj_id"]))
+        color = "#{:02x}{:02x}{:02x}".format(*_color_for_obj(p.obj_id))
         badge = (
             f'<span style="display:inline-block;width:10px;height:10px;'
             f'border-radius:50%;background:{color};margin-right:4px"></span>'
         )
-        if p["type"] == "point":
-            fg_tag = '<span style="color:green">fg</span>'
-            bg_tag = '<span style="color:red">bg</span>'
-            pts = ", ".join(
-                f"({pt[0]:.0f},{pt[1]:.0f}) {fg_tag if lb == 1 else bg_tag}"
-                for pt, lb in zip(p["points"], p["labels"], strict=False)
-            )
-            rows.append(f"{badge}Obj {p['obj_id']} | Frame {p['frame_idx']} | {pts}")
-        elif p["type"] == "box":
-            b = p["box"]
-            rows.append(
-                f"{badge}Obj {p['obj_id']} | Frame {p['frame_idx']} | "
-                f"box ({b[0]:.0f},{b[1]:.0f}) to ({b[2]:.0f},{b[3]:.0f})"
-            )
+        rows.append(f"{badge}{p.summary_html()}")
 
     body = "<br>".join(rows)
     return f'<div class="prompt-summary">{header}<hr style="margin:4px 0">{body}</div>'
@@ -399,7 +427,7 @@ def _format_prompts_html(prompts: list[dict]) -> str:
 
 def _track_and_render(
     frames_dir_str: str | None,
-    prompts_state: list[dict[str, Any]],
+    prompts_state: list[VideoPrompt],
     model_size: str,
     fps: float,
     alpha: float,
@@ -421,20 +449,7 @@ def _track_and_render(
             session = sam.video(frames_dir, offload_video_to_cpu=True)
 
             for prompt in prompts_state:
-                ptype = prompt["type"]
-                if ptype == "point":
-                    session.add_points(
-                        frame_idx=prompt["frame_idx"],
-                        obj_id=prompt["obj_id"],
-                        points=prompt["points"],
-                        labels=prompt["labels"],
-                    )
-                elif ptype == "box":
-                    session.add_box(
-                        frame_idx=prompt["frame_idx"],
-                        obj_id=prompt["obj_id"],
-                        box=prompt["box"],
-                    )
+                prompt.apply(session)
 
             if bidirectional:
                 results = session.propagate_bidirectional()
@@ -691,21 +706,23 @@ def _segment(
 # =========================================================================
 
 
-def _on_extract(
-    video_path: str | None, every_n: int, max_frames: int
-) -> tuple[
-    list[str],
-    str,
-    str | None,
-    int,
-    Any,
-    np.ndarray | None,
-    np.ndarray | None,
-    list[Any],
-    list[Any],
-    str,
-    str,
-]:
+class VideoTabState(NamedTuple):
+    """Outputs of :func:`_on_extract`, in Gradio output order."""
+
+    frame_files: list[str]
+    info: str
+    frames_dir: str | None
+    num_frames: int
+    slider: Any
+    preview: np.ndarray | None
+    clean_frame: np.ndarray | None
+    prompts: list[VideoPrompt]
+    box: list[Any]
+    counter: str
+    prompts_html: str
+
+
+def _on_extract(video_path: str | None, every_n: int, max_frames: int) -> VideoTabState:
     """Extract frames from an uploaded video and reset the video-tab state."""
     ff, info, fd, nf = _extract_video_frames(
         video_path,
@@ -715,25 +732,25 @@ def _on_extract(
     first = _get_frame_image(ff, 0)
     slider_update = gr.Slider(maximum=max(0, nf - 1), value=0)
     counter = f'<div class="frame-counter">Frame 0 / {max(0, nf - 1)}</div>'
-    return (
-        ff,
-        info,
-        fd,
-        nf,
-        slider_update,
-        first,
-        first,
-        [],
-        [],
-        counter,
-        _NO_PROMPTS_HTML,
+    return VideoTabState(
+        frame_files=ff,
+        info=info,
+        frames_dir=fd,
+        num_frames=nf,
+        slider=slider_update,
+        preview=first,
+        clean_frame=first,
+        prompts=[],
+        box=[],
+        counter=counter,
+        prompts_html=_NO_PROMPTS_HTML,
     )
 
 
 def _on_slider_change(
     frame_files: list[str],
     idx: int,
-    prompts: list[Any],
+    prompts: list[VideoPrompt],
     vid_box: list[Any],
     num_frames: int,
 ) -> tuple[np.ndarray | None, np.ndarray | None, str]:
@@ -748,15 +765,31 @@ def _on_slider_change(
     return annotated, clean, counter
 
 
+def _append_point(
+    prompts: list[VideoPrompt],
+    frame_idx: int,
+    obj_id: int,
+    x: float,
+    y: float,
+    label: int,
+) -> list[VideoPrompt]:
+    """Append a point to the matching prompt, or start a new one."""
+    for i, p in enumerate(prompts):
+        if isinstance(p, PointPrompt) and p.frame_idx == frame_idx and p.obj_id == obj_id:
+            updated = replace(p, points=[*p.points, [x, y]], labels=[*p.labels, label])
+            return [*prompts[:i], updated, *prompts[i + 1 :]]
+    return [*prompts, PointPrompt(frame_idx, obj_id, [[x, y]], [label])]
+
+
 def _on_frame_click(
     clean_frame: np.ndarray | None,
-    prompts: list[Any],
+    prompts: list[VideoPrompt],
     vid_box: list[Any],
     frame_slider_val: int,
     obj_id: int,
     mode: str,
     evt: gr.SelectData,
-) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+) -> tuple[np.ndarray | None, list[VideoPrompt], list[Any], str]:
     """Gradio ``select`` adapter for the video frame preview."""
     if clean_frame is None:
         return None, prompts, vid_box, _format_prompts_html(prompts)
@@ -768,45 +801,18 @@ def _on_frame_click(
     if _is_box_mode(mode):
         vid_box = [*vid_box, [x, y]]
         if len(vid_box) == 2:
-            bx1 = min(vid_box[0][0], vid_box[1][0])
-            by1 = min(vid_box[0][1], vid_box[1][1])
-            bx2 = max(vid_box[0][0], vid_box[1][0])
-            by2 = max(vid_box[0][1], vid_box[1][1])
+            (x1, y1), (x2, y2) = vid_box
             prompts = [
                 *prompts,
-                {
-                    "type": "box",
-                    "frame_idx": frame_idx,
-                    "obj_id": obj_id,
-                    "box": [bx1, by1, bx2, by2],
-                },
+                BoxPrompt(
+                    frame_idx,
+                    obj_id,
+                    [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)],
+                ),
             ]
             vid_box = []
     else:
-        label = _label_for_mode(mode)
-        existing = None
-        for p in prompts:
-            if p["type"] == "point" and p["frame_idx"] == frame_idx and p["obj_id"] == obj_id:
-                existing = p
-                break
-        if existing is not None:
-            prompts = [
-                {**p, "points": [*p["points"], [x, y]], "labels": [*p["labels"], label]}
-                if p is existing
-                else p
-                for p in prompts
-            ]
-        else:
-            prompts = [
-                *prompts,
-                {
-                    "type": "point",
-                    "frame_idx": frame_idx,
-                    "obj_id": obj_id,
-                    "points": [[x, y]],
-                    "labels": [label],
-                },
-            ]
+        prompts = _append_point(prompts, frame_idx, obj_id, x, y, _label_for_mode(mode))
 
     display = _format_prompts_html(prompts)
     annotated = _draw_video_prompts(clean_frame, prompts, frame_idx)
@@ -817,25 +823,21 @@ def _on_frame_click(
 
 def _vid_undo(
     clean_frame: np.ndarray | None,
-    prompts: list[Any],
+    prompts: list[VideoPrompt],
     vid_box: list[Any],
     frame_slider_val: int,
     mode: str,
-) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+) -> tuple[np.ndarray | None, list[VideoPrompt], list[Any], str]:
     """Undo the most recent video-tab prompt (point or box corner)."""
     frame_idx = int(frame_slider_val)
     if _is_box_mode(mode) and vid_box:
         vid_box = vid_box[:-1]
     elif prompts:
         last = prompts[-1]
-        if last["type"] == "point" and len(last["points"]) > 1:
+        if isinstance(last, PointPrompt) and len(last.points) > 1:
             prompts = [
                 *prompts[:-1],
-                {
-                    **last,
-                    "points": last["points"][:-1],
-                    "labels": last["labels"][:-1],
-                },
+                replace(last, points=last.points[:-1], labels=last.labels[:-1]),
             ]
         else:
             prompts = prompts[:-1]
@@ -848,24 +850,29 @@ def _vid_undo(
 
 def _vid_clear(
     clean_frame: np.ndarray | None,
-) -> tuple[np.ndarray | None, list[Any], list[Any], str]:
+) -> tuple[np.ndarray | None, list[VideoPrompt], list[Any], str]:
     """Clear all video-tab prompts."""
     return clean_frame, [], [], _NO_PROMPTS_HTML
 
 
-def build_app() -> gr.Blocks:
-    """Construct and return the Gradio Blocks app.
+def _style_kwargs() -> dict[str, Any]:
+    """Theme and CSS kwargs for the installed Gradio version.
 
     Gradio 6 moved ``theme`` and ``css`` from the ``Blocks`` constructor to
-    ``launch()``. This builds the layout in a way that works on both.
+    ``launch()``; this is the single place that knows which one applies.
+    """
+    return {"theme": gr.themes.Soft(), "css": _CSS}
+
+
+def build_app() -> gr.Blocks:
+    """Construct and return the Gradio Blocks app.
 
     Returns:
         The assembled :class:`gradio.Blocks` application.
     """
     blocks_kwargs: dict[str, Any] = {"title": "lazysammy Demo"}
     if _gradio_major_version() < 6:
-        blocks_kwargs["theme"] = gr.themes.Soft()
-        blocks_kwargs["css"] = _CSS
+        blocks_kwargs.update(_style_kwargs())
 
     with gr.Blocks(**blocks_kwargs) as app:  # type: ignore[arg-type]
         gr.Markdown(
@@ -1296,7 +1303,6 @@ if __name__ == "__main__":
         "share": False,
     }
     if _gradio_major_version() >= 6:
-        launch_kwargs["theme"] = gr.themes.Soft()
-        launch_kwargs["css"] = _CSS
+        launch_kwargs.update(_style_kwargs())
 
     demo.launch(**launch_kwargs)  # type: ignore[arg-type]

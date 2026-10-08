@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import socket
+import sys
 import threading
 import time
 from contextlib import closing
@@ -46,7 +47,12 @@ def app_module() -> Any:
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Register before exec so dataclasses can resolve the module namespace.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
     return module
 
 
