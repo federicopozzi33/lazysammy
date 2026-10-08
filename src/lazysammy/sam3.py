@@ -37,6 +37,11 @@ class SAM3:
     A single :class:`SAM3` object lazily creates the image and video predictors
     on first use, so you only pay for what you need.
 
+    The methods below deliberately mirror :class:`~lazysammy.sam2.SAM2` so the
+    two facades are interchangeable for geometric prompts; the delegation is
+    the API, not incidental indirection. Stateful prompt workflows that need
+    the underlying segmenter can reach it through :attr:`concept_segmenter`.
+
     Example::
 
         sam = SAM3()

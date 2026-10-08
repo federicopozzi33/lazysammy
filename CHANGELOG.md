@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ConceptSegmenter` and `SAM3VideoTracker` are the underlying components;
     `ConceptPrediction` is the new result type (masks + boxes + concept).
   - `save_concept_prediction()` writes concept masks to disk.
+  - `ImageSegmenter` and `ConceptSegmenter` share one geometric-prompt path
+    (`GeometricPromptMixin`), so the SAM 1/2-style point/box/mask task has a
+    single implementation.
+  - `BaseVideoSession` is the shared session surface for `VideoSession` and
+    `SAM3VideoSession`.
 - The example notebook gains a SAM 3 section (open-vocabulary concept
   segmentation and video tracking), guarded by an availability check so it is
   skipped when the optional extra is not installed.

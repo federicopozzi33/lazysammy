@@ -5,17 +5,17 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
 import torch
 
+from lazysammy.geometric import GeometricPromptMixin, build_masks
 from lazysammy.io import save_image_prediction
 from lazysammy.types import (
     BoundingBox,
     ImagePrediction,
-    Mask,
     MaskLogits,
     ModelSize,
     PointCoords,
@@ -38,7 +38,7 @@ from lazysammy.validation import (
 logger = logging.getLogger(__name__)
 
 
-class ImageSegmenter:
+class ImageSegmenter(GeometricPromptMixin):
     """Easy-to-use image segmentation powered by SAM2.
 
     Wraps :class:`SAM2ImagePredictor` with a simpler API that handles
@@ -96,32 +96,9 @@ class ImageSegmenter:
     # Image encoding (set once, prompt many)
     # ------------------------------------------------------------------
 
-    def set_image(self, image: str | Path | npt.NDArray[np.uint8]) -> tuple[int, int]:
-        """Encode an image once so repeated prompts reuse the embedding.
-
-        Calling this is optional: :meth:`segment` and :meth:`refine` encode the
-        image automatically and reuse the cached embedding when the same image
-        is passed again. Call it explicitly to pre-warm the encoder.
-
-        Args:
-            image: File path or ``(H, W, 3)`` RGB uint8 array.
-
-        Returns:
-            The ``(H, W)`` shape of the encoded image.
-        """
-        img = load_image(image)
-        with torch.inference_mode(), autocast(self._device):
-            self._predictor.set_image(img)
-        self._image_cache.store(image, img.shape[:2])
-        return img.shape[:2]
-
-    def _ensure_image(self, image: str | Path | npt.NDArray[np.uint8]) -> tuple[int, int]:
-        """Encode *image* unless the same image is already cached."""
-        if self._image_cache.matches(image):
-            shape = self._image_cache.shape
-            assert shape is not None
-            return shape
-        return self.set_image(image)
+    def _set_image_embedding(self, img: npt.NDArray[np.uint8]) -> None:
+        """Store the SAM 2 image embedding for *img*."""
+        self._predictor.set_image(img)
 
     # ------------------------------------------------------------------
     # Core prediction
@@ -142,15 +119,31 @@ class ImageSegmenter:
         rather than a boolean mask, so the values are thresholded at ``0``
         (positive logits are foreground) before being stored as booleans.
         """
-        mask_objs = [
-            Mask(
-                data=(masks_np[i] > 0.0 if return_logits else masks_np[i].astype(bool)),
-                score=float(scores_np[i]),
-                logits=(logits_np[i] if logits_np is not None else None),
-            )
-            for i in range(len(masks_np))
-        ]
-        return ImagePrediction(masks=mask_objs, image_shape=image_shape)
+        return ImagePrediction(
+            masks=build_masks(masks_np, scores_np, logits_np, return_logits=return_logits),
+            image_shape=image_shape,
+        )
+
+    def _run_geometric(
+        self,
+        *,
+        points: npt.NDArray[np.float32] | None,
+        labels: npt.NDArray[np.int32] | None,
+        box: npt.NDArray[np.float32] | None,
+        mask_input: npt.NDArray[np.floating[Any]] | None,
+        multimask_output: bool,
+        return_logits: bool,
+    ) -> tuple[npt.NDArray[Any], npt.NDArray[Any], npt.NDArray[Any] | None]:
+        """Run the SAM 2 predictor on already-normalized prompts."""
+        result = self._predictor.predict(
+            point_coords=points,
+            point_labels=labels,
+            box=box,
+            mask_input=mask_input,
+            multimask_output=multimask_output,
+            return_logits=return_logits,
+        )
+        return cast("tuple[npt.NDArray[Any], npt.NDArray[Any], npt.NDArray[Any] | None]", result)
 
     def _predict_prompts(
         self,
@@ -163,40 +156,16 @@ class ImageSegmenter:
         multimask_output: bool,
         return_logits: bool,
     ) -> ImagePrediction:
-        """Run already-validated prompts through the predictor.
-
-        Shared by :meth:`segment`, :meth:`predict`, and the multi-object
-        helpers so the mask-input normalization and inference wrapper live in
-        exactly one place.
-        """
-        # SAM2's ``_prep_prompts`` only adds a batch dimension to 3D mask
-        # logits, so a bare 2D ``(H, W)`` mask must be promoted to
-        # ``(1, H, W)`` here to avoid a shape error deep in the model.
-        mask_input_norm = mask_input
-        if mask_input_norm is not None and mask_input_norm.ndim == 2:
-            mask_input_norm = mask_input_norm[None, :, :]
-
-        with torch.inference_mode(), autocast(self._device):
-            pt = np.array(points, dtype=np.float32) if points is not None else None
-            lb = np.array(labels, dtype=np.int32) if labels is not None else None
-            bx = normalize_box(box) if box is not None else None
-
-            masks_np, scores_np, logits_np = self._predictor.predict(
-                point_coords=pt,
-                point_labels=lb,
-                box=bx,
-                mask_input=mask_input_norm,
-                multimask_output=multimask_output,
-                return_logits=return_logits,
-            )
-
-        return self._to_image_prediction(
-            masks_np,
-            scores_np,
-            logits_np,
-            image_shape=image_shape,
+        """Run already-validated prompts through the predictor."""
+        masks = self._predict_geometric(
+            points=points,
+            labels=labels,
+            box=box,
+            mask_input=mask_input,
+            multimask_output=multimask_output,
             return_logits=return_logits,
         )
+        return ImagePrediction(masks=masks, image_shape=image_shape)
 
     def segment(
         self,

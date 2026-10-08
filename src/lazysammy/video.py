@@ -164,7 +164,7 @@ class VideoTracker:
         return self._predictor
 
 
-class _BaseVideoSession:
+class BaseVideoSession:
     """Shared session surface for SAM 2 and SAM 3 video tracking.
 
     Owns the frame bookkeeping, results access, and the save/overlay helpers so
@@ -313,7 +313,7 @@ class _BaseVideoSession:
         )
 
 
-class VideoSession(_BaseVideoSession):
+class VideoSession(BaseVideoSession):
     """A tracking session on one video.
 
     This object is returned by :meth:`VideoTracker.new_session` and provides

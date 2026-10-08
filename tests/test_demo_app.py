@@ -43,6 +43,11 @@ USER_ONLY_TRIGGER = "input"
 @pytest.fixture(scope="module")
 def app_module() -> Any:
     """Import `demo/app.py` as a module. It is a script, not a package member."""
+    # `demo/app.py` imports its helpers from the sibling `lazysammy_demo`
+    # package, so `demo/` must be importable while the module is executed.
+    demo_dir = str(APP_PATH.parent)
+    if demo_dir not in sys.path:
+        sys.path.insert(0, demo_dir)
     spec = importlib.util.spec_from_file_location("lazysammy_demo_app", APP_PATH)
     assert spec is not None
     assert spec.loader is not None
@@ -544,6 +549,22 @@ def test_add_text_prompt_ignores_blank(app_module: Any, sample_rgb: np.ndarray) 
     assert prompts == []
 
 
+def test_draw_concept_boxes_without_boxes_is_a_noop(
+    app_module: Any, sample_rgb: np.ndarray
+) -> None:
+    """Regression: zipping masks against empty boxes must not drop or crash."""
+    from lazysammy_demo.drawing import draw_concept_boxes
+
+    class _Pred:
+        def __init__(self) -> None:
+            self.masks = [_StubMask(np.ones(sample_rgb.shape[:2], dtype=bool))]
+            self.boxes: list[list[float]] = []
+
+    out = draw_concept_boxes(sample_rgb, _Pred())
+    assert out.shape == sample_rgb.shape
+    assert bool((out == sample_rgb).all())
+
+
 def test_text_prompt_summary_and_draw(app_module: Any, sample_rgb: np.ndarray) -> None:
     prompt = app_module.TextPrompt(0, "person")
     assert "person" in prompt.summary_html()
@@ -581,8 +602,8 @@ def test_track_uses_sam3_when_text_prompt_present(
             calls["video"] = frames_dir
             return _StubSession()
 
-    monkeypatch.setattr(app_module, "_get_sam3_model", lambda: _StubSAM3Video())
-    monkeypatch.setattr(app_module, "save_video_overlay_mp4", lambda *a, **k: None)
+    monkeypatch.setattr("lazysammy_demo.video_tab.get_sam3_model", lambda: _StubSAM3Video())
+    monkeypatch.setattr("lazysammy_demo.video_tab.save_video_overlay_mp4", lambda *a, **k: None)
 
     frames_dir = tmp_path / "frames"
     frames_dir.mkdir()

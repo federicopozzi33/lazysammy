@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
 import torch
 
+from lazysammy.geometric import GeometricPromptMixin
 from lazysammy.types import (
     BoundingBox,
     ConceptPrediction,
@@ -28,7 +29,7 @@ from lazysammy.types import (
     PointCoords,
     PointLabels,
 )
-from lazysammy.utils import ImageEmbeddingCache, auto_detect_device, autocast, load_image
+from lazysammy.utils import ImageEmbeddingCache, auto_detect_device, autocast
 from lazysammy.validation import (
     normalize_box,
     validate_box,
@@ -38,7 +39,7 @@ from lazysammy.validation import (
 logger = logging.getLogger(__name__)
 
 
-class ConceptSegmenter:
+class ConceptSegmenter(GeometricPromptMixin):
     """Open-vocabulary image segmentation powered by SAM 3.
 
     Example::
@@ -119,28 +120,9 @@ class ConceptSegmenter:
     # Image encoding (set once, prompt many)
     # ------------------------------------------------------------------
 
-    def set_image(self, image: str | Path | npt.NDArray[np.uint8]) -> tuple[int, int]:
-        """Encode an image once so repeated prompts reuse the embedding.
-
-        Args:
-            image: File path or ``(H, W, 3)`` RGB uint8 array.
-
-        Returns:
-            The ``(H, W)`` shape of the encoded image.
-        """
-        img = load_image(image)
-        with torch.inference_mode(), autocast(self._device):
-            self._state = self._processor.set_image(img)
-        self._image_cache.store(image, img.shape[:2])
-        return img.shape[:2]
-
-    def _ensure_image(self, image: str | Path | npt.NDArray[np.uint8]) -> tuple[int, int]:
-        """Encode *image* unless the same image is already cached."""
-        if self._image_cache.matches(image):
-            shape = self._image_cache.shape
-            assert shape is not None
-            return shape
-        return self.set_image(image)
+    def _set_image_embedding(self, img: npt.NDArray[np.uint8]) -> None:
+        """Store the SAM 3 processor state for *img*."""
+        self._state = self._processor.set_image(img)
 
     def reset(self) -> None:
         """Clear all prompts and results for the current image."""
@@ -256,8 +238,7 @@ class ConceptSegmenter:
             mask_input=mask_input,
         )
         image_shape = self._ensure_image(image)
-        return self._predict_inst(
-            image_shape=image_shape,
+        masks = self._predict_geometric(
             points=points,
             labels=labels,
             box=box,
@@ -265,6 +246,7 @@ class ConceptSegmenter:
             multimask_output=multimask_output,
             return_logits=return_logits,
         )
+        return ConceptPrediction(masks=masks, image_shape=image_shape)
 
     def predict(
         self,
@@ -292,7 +274,8 @@ class ConceptSegmenter:
         Raises:
             RuntimeError: If no image has been set with :meth:`set_image`.
         """
-        if self._image_cache.shape is None:
+        image_shape = self._image_cache.shape
+        if image_shape is None:
             msg = "No image is set. Call set_image(image) before predict()."
             raise RuntimeError(msg)
         validate_segment_prompts(
@@ -301,8 +284,7 @@ class ConceptSegmenter:
             box=box,
             mask_input=mask_input,
         )
-        return self._predict_inst(
-            image_shape=self._image_cache.shape,
+        masks = self._predict_geometric(
             points=points,
             labels=labels,
             box=box,
@@ -310,46 +292,30 @@ class ConceptSegmenter:
             multimask_output=multimask_output,
             return_logits=return_logits,
         )
+        return ConceptPrediction(masks=masks, image_shape=image_shape)
 
-    def _predict_inst(
+    def _run_geometric(
         self,
         *,
-        image_shape: tuple[int, int],
-        points: PointCoords | None,
-        labels: PointLabels | None,
-        box: BoundingBox | None,
-        mask_input: MaskLogits | None,
+        points: npt.NDArray[np.float32] | None,
+        labels: npt.NDArray[np.int32] | None,
+        box: npt.NDArray[np.float32] | None,
+        mask_input: npt.NDArray[np.floating[Any]] | None,
         multimask_output: bool,
         return_logits: bool,
-    ) -> ConceptPrediction:
-        """Run the SAM 1/2-style interactive predictor on the current image."""
-        pt = np.array(points, dtype=np.float32) if points is not None else None
-        lb = np.array(labels, dtype=np.int32) if labels is not None else None
-        bx = normalize_box(box)[None, :] if box is not None else None
-        mask_in = mask_input
-        if mask_in is not None and mask_in.ndim == 2:
-            mask_in = mask_in[None, :, :]
-
-        with torch.inference_mode(), autocast(self._device):
-            masks_np, scores_np, logits_np = self._model.predict_inst(
-                self._state,
-                point_coords=pt,
-                point_labels=lb,
-                box=bx,
-                mask_input=mask_in,
-                multimask_output=multimask_output,
-                return_logits=return_logits,
-            )
-
-        masks = [
-            Mask(
-                data=(masks_np[i] > 0.0 if return_logits else masks_np[i].astype(bool)),
-                score=float(scores_np[i]),
-                logits=(logits_np[i] if logits_np is not None else None),
-            )
-            for i in range(len(masks_np))
-        ]
-        return ConceptPrediction(masks=masks, image_shape=image_shape)
+    ) -> tuple[npt.NDArray[Any], npt.NDArray[Any], npt.NDArray[Any] | None]:
+        """Run the SAM 3 interactive predictor on already-normalized prompts."""
+        bx = box[None, :] if box is not None else None
+        result = self._model.predict_inst(
+            self._state,
+            point_coords=points,
+            point_labels=labels,
+            box=bx,
+            mask_input=mask_input,
+            multimask_output=multimask_output,
+            return_logits=return_logits,
+        )
+        return cast("tuple[npt.NDArray[Any], npt.NDArray[Any], npt.NDArray[Any] | None]", result)
 
     # ------------------------------------------------------------------
     # Internal
@@ -372,7 +338,14 @@ class ConceptSegmenter:
         concept: str | None,
         image_shape: tuple[int, int],
     ) -> ConceptPrediction:
-        """Convert a ``Sam3Processor`` state dict into a :class:`ConceptPrediction`."""
+        """Convert a ``Sam3Processor`` state dict into a :class:`ConceptPrediction`.
+
+        A processor state either has no detections (no ``masks`` key) or has
+        ``masks``, ``scores``, and ``boxes`` together: ``_forward_grounding``
+        sets all three as a unit. The three are therefore read as a unit, so a
+        state that has masks but is missing scores or boxes fails loudly rather
+        than silently producing a truncated prediction.
+        """
         masks_arr = state.get("masks")
         if masks_arr is None:
             return ConceptPrediction(masks=[], concept=concept, image_shape=image_shape)
@@ -380,8 +353,8 @@ class ConceptSegmenter:
         masks_np = np.asarray(masks_arr)
         if masks_np.ndim == 4:  # (N, 1, H, W)
             masks_np = masks_np[:, 0]
-        scores = np.asarray(state.get("scores", []), dtype=np.float32).reshape(-1)
-        boxes = np.asarray(state.get("boxes", []), dtype=np.float32).reshape(-1, 4)
+        scores = np.asarray(state["scores"], dtype=np.float32).reshape(-1)
+        boxes = np.asarray(state["boxes"], dtype=np.float32).reshape(-1, 4)
 
         masks = [
             Mask(data=masks_np[i].astype(bool), score=float(scores[i]))
