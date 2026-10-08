@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `ConceptPrediction` is the new result type (masks + boxes + concept).
   - `ModelFamily` enum distinguishes SAM 2 from SAM 3.
   - `save_concept_prediction()` writes concept masks to disk.
+- The example notebook gains a SAM 3 section (open-vocabulary concept
+  segmentation and video tracking), guarded by an availability check so it is
+  skipped when the optional extra is not installed.
 - `scripts/build_notebook.py`, which generates `examples/video_tracking.ipynb`
   from reviewable Python source so the notebook stays reproducible and diffable.
 - `scripts/make_comparison.py`, which derives the README's side-by-side figure
