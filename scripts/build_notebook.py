@@ -33,7 +33,8 @@ cells = [
 # Video Object Tracking with lazysammy
 
 This notebook walks through the **video capabilities** of `lazysammy`, a
-high-level wrapper around Meta's [SAM 2](https://github.com/facebookresearch/sam2).
+high-level wrapper around Meta's [SAM 2](https://github.com/facebookresearch/sam2)
+and [SAM 3](https://github.com/facebookresearch/sam3).
 
 **What you will learn**
 
@@ -43,6 +44,7 @@ high-level wrapper around Meta's [SAM 2](https://github.com/facebookresearch/sam
 4. Propagate forward, backward, and bidirectionally
 5. Inspect, visualise, and save results
 6. Manage objects mid-sequence (add, correct, remove, reset)
+7. Segment and track **open-vocabulary concepts** with SAM 3 (optional)
 
 > **Setup:** install the notebook extras first:
 > `uv sync --extra notebook --extra viz`
@@ -86,11 +88,22 @@ from lazysammy import (
     show_video_frame,
 )
 
+# SAM 3 is an optional extra. The wrapper imports fine without it; only loading
+# the model needs the `sam3` package, so we detect it here and skip section 12
+# when it is missing.
+try:
+    import sam3  # noqa: F401
+
+    SAM3_AVAILABLE = True
+except ImportError:
+    SAM3_AVAILABLE = False
+
 plt.rcParams["figure.dpi"] = 110
 
 print(f"lazysammy {lazysammy.__version__}")
 print(f"matplotlib backend: {matplotlib.get_backend()}")
 print(f"interactive backend available: {is_interactive_backend()}")
+print(f"SAM 3 available: {SAM3_AVAILABLE}")
 """
     ),
     md(
@@ -607,6 +620,80 @@ else:
     ),
     md(
         """
+## 12. Open-vocabulary concepts with SAM 3 (optional)
+
+SAM 3 adds **concept prompts**: describe what you want in words and it segments
+and tracks *every* matching instance, assigning each a unique object id. This
+section needs the optional extra:
+
+```bash
+uv sync --extra sam3
+```
+
+> SAM 3 requires Python 3.12+ and PyTorch 2.7+, and its checkpoints must be
+> requested on the [HuggingFace repo](https://huggingface.co/facebook/sam3)
+> before they can be downloaded. If `SAM3_AVAILABLE` was `False` above, skip
+> this section.
+"""
+    ),
+    code(
+        """
+if not SAM3_AVAILABLE:
+    print("SAM 3 is not installed; skipping. Install with: uv sync --extra sam3")
+else:
+    from lazysammy import SAM3
+
+    sam3_model = SAM3()  # downloads facebook/sam3 on first use
+
+    # --- Image: every instance of a text concept ---
+    # pred = sam3_model.segment_text("photo.jpg", "a player in white")
+    # for mask, box in zip(pred.masks, pred.boxes):
+    #     print(mask.score, box)
+
+    # --- Image: every instance matching a box exemplar ---
+    # pred = sam3_model.segment_exemplar("photo.jpg", [120, 80, 300, 400])
+
+    # --- Video: track a concept through the clip ---
+    sam3_session = sam3_model.video(
+        VIDEO_PATH,
+        max_frames=MAX_FRAMES,
+        clean=True,
+    )
+    sam3_session.add_text(frame_idx=0, text="person")
+    sam3_results = sam3_session.propagate(direction="forward")
+    print(
+        f"SAM 3 tracked {len(sam3_results.object_ids)} instance(s) "
+        f"over {len(sam3_results)} frame(s)"
+    )
+    sam3_session.save_overlay("output/sam3_tracking.mp4", fps=24, alpha=0.5)
+    sam3_session.close()
+    print("Wrote output/sam3_tracking.mp4")
+"""
+    ),
+    md(
+        """
+### 12.1. Geometric prompts still work
+
+`SAM3` keeps the SAM 2 interface for points, boxes, and masks, so it is a
+drop-in replacement when you do not need concepts.
+"""
+    ),
+    code(
+        """
+if SAM3_AVAILABLE:
+    # Same call shape as SAM2.segment(...). Reuse a frame from the SAM 2 session.
+    pred = sam3_model.segment(
+        session.get_frame(0),
+        points=[[350, 250]],
+        labels=[1],
+    )
+    print(f"Geometric prompt -> {len(pred)} mask(s), best score {pred.best_mask.score:.3f}")
+else:
+    print("SAM 3 is not installed; skipping.")
+"""
+    ),
+    md(
+        """
 ---
 
 ## Summary
@@ -620,6 +707,7 @@ You now know how to:
 - Inspect results per frame and per object
 - Save masks as PNG, `.npy`, or COCO RLE, and render overlay videos
 - Manage objects mid-sequence
+- Segment and track open-vocabulary concepts with SAM 3 (optional)
 
 For image segmentation and auto-mask workflows, see the
 [README](https://github.com/federicopozzi33/easier-sam2#readme):
