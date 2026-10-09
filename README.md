@@ -7,17 +7,18 @@
   <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+"/>
   <img src="https://img.shields.io/badge/typing-mypy%20strict-blueviolet" alt="Type checked with mypy strict"/>
   <img src="https://img.shields.io/badge/lint-ruff-261230" alt="Linted with Ruff"/>
-  <a href="https://github.com/facebookresearch/sam2"><img src="https://img.shields.io/badge/powered%20by-SAM%202-purple" alt="Powered by SAM 2"/></a>
+  <a href="https://github.com/facebookresearch/sam2"><img src="https://img.shields.io/badge/powered%20by-SAM%202%20%7C%20SAM%203-purple" alt="Powered by SAM 2 and SAM 3"/></a>
   <img src="https://img.shields.io/badge/platform-CUDA%20%7C%20MPS%20%7C%20CPU-lightgrey" alt="Platform"/>
 </p>
 
 # lazysammy
 
-**A high-level, typed wrapper around [Meta's SAM 2](https://github.com/facebookresearch/sam2) for image segmentation and video object tracking.**
+**A high-level, typed wrapper around [Meta's SAM 2](https://github.com/facebookresearch/sam2) and [SAM 3](https://github.com/facebookresearch/sam3) for image segmentation and video object tracking.**
 
-`lazysammy` gives you one small, well-typed API for the three things people
-actually do with SAM 2 - segment an image, track an object through a video, and
-auto-segment everything - without the research-codebase glue.
+`lazysammy` gives you one small, well-typed API for the things people actually
+do with SAM - segment an image, track an object through a video, auto-segment
+everything, and (with SAM 3) segment every instance of a text concept - without
+the research-codebase glue.
 
 ---
 
@@ -27,6 +28,7 @@ auto-segment everything - without the research-codebase glue.
 - [What you get](#what-you-get)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Feature support: SAM 2 vs SAM 3](#feature-support-sam-2-vs-sam-3)
 - [Core workflows](#core-workflows)
 - [API at a glance](#api-at-a-glance)
 - [Result types](#result-types)
@@ -292,6 +294,53 @@ refined = sam.refine("photo.jpg", pred.best_mask.logits, points=[[120, 180]], la
 
 # Concept results can be bridged to the SAM 2 result shape
 image_pred = sam.to_image_prediction(pred)  # drops boxes + concept label
+```
+
+---
+
+## Feature support: SAM 2 vs SAM 3
+
+SAM 3 is the latest generation, and `lazysammy` exposes it as a **superset** of
+the SAM 2 API: everything SAM 2 can do, SAM 3 can do too, plus the
+open-vocabulary concept features. The table below is the full support matrix.
+
+| Feature | `SAM2` | `SAM3` | Notes |
+|---------|:------:|:------:|-------|
+| `segment` (points / box / mask) | Yes | Yes | SAM 3 also accepts a `text=` concept |
+| `segment_point` | Yes | Yes | single foreground/background click |
+| `segment_box` | Yes | Yes | single box, single mask |
+| `segment_multi_box` | Yes | Yes | one object per box, one image |
+| `segment_multi_point` | Yes | Yes | one object per point set |
+| `set_image` + `predict` | Yes | Yes | encode once, prompt many |
+| `refine` | Yes | Yes | iterative refinement via previous logits |
+| `segment_batch` | Yes | Yes | per-image prompts; SAM 3 uses `predict_inst_batch` |
+| Text (open-vocabulary) prompt | No | Yes | `segment_text(image, "a player in white")` |
+| Box exemplar prompt | No | Yes | `segment_exemplar(image, box)` finds look-alikes |
+| Auto-segment everything | Yes | No | SAM 3 ships no point-grid automatic generator |
+| Video: point / box prompts | Yes | Yes | same session API |
+| Video: mask prompt (`add_mask`) | Yes | No | SAM 3 multiplex exposes point-based tracker APIs only |
+| Video: text concept prompt | No | Yes | `session.add_text(frame_idx, text)` |
+| Video: bidirectional propagate | Yes | Yes | `propagate_bidirectional()` vs `propagate(direction="both")` |
+| Typed results (`ImagePrediction` / `ConceptPrediction`) | Yes | Yes | `to_image_prediction()` bridges the two |
+| Save (PNG / NPY / COCO RLE) | Yes | Yes | `sam.save(result, dir, fmt=...)` |
+
+Two rows intentionally say **No** for SAM 3:
+
+- **Auto-segment everything.** SAM 2's `auto_segment` is built on
+  `SAM2AutomaticMaskGenerator`, a point-grid + NMS pipeline. SAM 3 upstream
+  ships no equivalent generator, so `lazysammy` does not fake one. If you need
+  SAM 2's "segment everything", use `SAM2.auto_segment`.
+- **Video mask prompt.** SAM 3's video predictor conditions tracker objects by
+  points/boxes/text; its multiplex API has no caller-supplied mask entry point,
+  so `SAM3VideoSession` omits `add_mask`.
+
+```python
+# The concept result type carries boxes; the SAM 2 one does not.
+pred2 = SAM2("large").segment("photo.jpg", points=[[100, 200]], labels=[1])  # ImagePrediction
+pred3 = SAM3().segment("photo.jpg", points=[[100, 200]], labels=[1])         # ConceptPrediction
+
+# Bridge a SAM 3 result to the SAM 2 shape when you need it.
+image_pred = SAM3().to_image_prediction(pred3)
 ```
 
 ---
