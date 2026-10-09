@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **SAM 3 integration** (optional, `pip install lazysammy[sam3]`). A new
-  `SAM3` facade mirrors the `SAM2` interface for geometric prompts while
-  exposing SAM 3's open-vocabulary concept features:
+- **SAM 3 integration** (optional, `pip install lazysammy[sam3]`). SAM 3 is the
+  latest generation and is exposed as a **full superset** of the SAM 2 API: every
+  feature works on `SAM3`, plus the new open-vocabulary concept features.
   - `SAM3.segment_text(image, "a player in white")` detects and segments
     *every* instance of a text concept in an image.
   - `SAM3.segment_exemplar(image, box)` finds all instances matching a box
@@ -19,12 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `SAM3.video(...)` returns a `SAM3VideoSession` whose `add_text()` prompt
     tracks every instance of a concept through a video, assigning each a
     unique object id.
+  - **Complete SAM 2 image parity**: `SAM3` exposes the same image surface as
+    `SAM2` - `segment`, `segment_point`, `segment_box`, `segment_multi_box`,
+    `segment_multi_point`, `set_image`/`predict`, `refine`, and
+    `segment_batch` - all backed by the shared `GeometricPromptMixin`, so the
+    SAM 1/2-style point/box/mask task has a single implementation across both
+    backends.
+  - `SAM3.to_image_prediction(pred)` bridges a `ConceptPrediction` to an
+    `ImagePrediction` (dropping boxes and the concept label) for code written
+    against the SAM 2 result type, and `SAM3.save()` now accepts either result
+    type.
   - `ConceptSegmenter` and `SAM3VideoTracker` are the underlying components;
     `ConceptPrediction` is the new result type (masks + boxes + concept).
   - `save_concept_prediction()` writes concept masks to disk.
-  - `ImageSegmenter` and `ConceptSegmenter` share one geometric-prompt path
-    (`GeometricPromptMixin`), so the SAM 1/2-style point/box/mask task has a
-    single implementation.
   - `BaseVideoSession` is the shared session surface for `VideoSession` and
     `SAM3VideoSession`.
 - The example notebook gains a SAM 3 section (open-vocabulary concept

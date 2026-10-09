@@ -11,7 +11,9 @@ the capabilities SAM 3 adds over SAM 2.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -22,6 +24,7 @@ from lazysammy.sam3_video import SAM3VideoSession, SAM3VideoTracker
 from lazysammy.types import (
     BoundingBox,
     ConceptPrediction,
+    ImagePrediction,
     MaskLogits,
     PointCoords,
     PointLabels,
@@ -39,8 +42,11 @@ class SAM3:
 
     The methods below deliberately mirror :class:`~lazysammy.sam2.SAM2` so the
     two facades are interchangeable for geometric prompts; the delegation is
-    the API, not incidental indirection. Stateful prompt workflows that need
-    the underlying segmenter can reach it through :attr:`concept_segmenter`.
+    the API, not incidental indirection. That parity is complete: SAM 3
+    supports every SAM 2 image feature (points, boxes, masks, multi-object
+    helpers, refinement, and batching) as well as its own concept features.
+    Stateful prompt workflows that need the underlying segmenter can reach it
+    through :attr:`concept_segmenter`.
 
     Example::
 
@@ -53,6 +59,8 @@ class SAM3:
 
         # Geometric prompts (SAM 1/2 task)
         pred = sam.segment("photo.jpg", points=[[100, 200]], labels=[1])
+        pred = sam.segment_point("photo.jpg", 100, 200)
+        pred = sam.segment_box("photo.jpg", 10, 10, 200, 200)
 
         # Video concept tracking
         session = sam.video("clip.mp4")
@@ -283,27 +291,185 @@ class SAM3:
             return_logits=return_logits,
         )
 
+    def segment_point(
+        self,
+        image: str | Path | npt.NDArray[np.uint8],
+        x: float,
+        y: float,
+        *,
+        foreground: bool = True,
+        multimask_output: bool = True,
+    ) -> ConceptPrediction:
+        """Segment with a single point click.
+
+        Args:
+            image: Image to segment.
+            x: X coordinate of the click.
+            y: Y coordinate of the click.
+            foreground: ``True`` for a positive click, ``False`` for negative.
+            multimask_output: Return multiple masks.
+
+        Returns:
+            A :class:`ConceptPrediction` containing the masks.
+        """
+        return self.concept_segmenter.segment_point(
+            image, x, y, foreground=foreground, multimask_output=multimask_output
+        )
+
+    def segment_box(
+        self,
+        image: str | Path | npt.NDArray[np.uint8],
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+    ) -> ConceptPrediction:
+        """Segment with a bounding box prompt.
+
+        Args:
+            image: Image to segment.
+            x1, y1, x2, y2: Box coordinates.
+
+        Returns:
+            A :class:`ConceptPrediction` containing the mask.
+        """
+        return self.concept_segmenter.segment_box(image, x1, y1, x2, y2)
+
+    def segment_multi_box(
+        self,
+        image: str | Path | npt.NDArray[np.uint8],
+        boxes: Sequence[Sequence[float]],
+    ) -> list[ConceptPrediction]:
+        """Segment multiple objects, each with a bounding box.
+
+        Args:
+            image: Image to segment.
+            boxes: List of ``[x1, y1, x2, y2]`` boxes.
+
+        Returns:
+            One :class:`ConceptPrediction` per box.
+        """
+        return self.concept_segmenter.segment_multi_box(image, boxes)
+
+    def segment_multi_point(
+        self,
+        image: str | Path | npt.NDArray[np.uint8],
+        points_per_object: Sequence[Sequence[Sequence[float]]],
+        *,
+        labels_per_object: Sequence[Sequence[int]] | None = None,
+        multimask_output: bool = False,
+    ) -> list[ConceptPrediction]:
+        """Segment multiple objects, each with its own point prompts.
+
+        The image is encoded once and reused for every object.
+
+        Args:
+            image: Image to segment.
+            points_per_object: One ``(N, 2)`` point list per object.
+            labels_per_object: One label list per object (defaults to all fg).
+            multimask_output: Return 3 masks per object for ambiguous prompts.
+
+        Returns:
+            One :class:`ConceptPrediction` per object.
+        """
+        return self.concept_segmenter.segment_multi_point(
+            image,
+            points_per_object,
+            labels_per_object=labels_per_object,
+            multimask_output=multimask_output,
+        )
+
+    def refine(
+        self,
+        image: str | Path | npt.NDArray[np.uint8],
+        previous_logits: npt.NDArray[np.floating[Any]],
+        *,
+        points: PointCoords | None = None,
+        labels: PointLabels | None = None,
+    ) -> ConceptPrediction:
+        """Refine a prior prediction with additional prompts.
+
+        Args:
+            image: Same image as the previous prediction.
+            previous_logits: Low-res logits from :attr:`Mask.logits`.
+            points: Additional point prompts for refinement.
+            labels: Labels for the additional points.
+
+        Returns:
+            Refined :class:`ConceptPrediction`.
+        """
+        return self.concept_segmenter.refine(image, previous_logits, points=points, labels=labels)
+
+    def segment_batch(
+        self,
+        images: Sequence[str | Path | npt.NDArray[np.uint8]],
+        *,
+        points_batch: Sequence[npt.NDArray[np.floating[Any]] | None] | None = None,
+        labels_batch: Sequence[npt.NDArray[np.integer[Any]] | None] | None = None,
+        box_batch: Sequence[npt.NDArray[np.floating[Any]] | None] | None = None,
+        multimask_output: bool = True,
+    ) -> list[ConceptPrediction]:
+        """Segment a batch of images with per-image prompts.
+
+        Args:
+            images: List of file paths or ``(H, W, 3)`` arrays.
+            points_batch: Per-image ``(N, 2)`` point arrays (``None`` to skip).
+            labels_batch: Per-image point labels.
+            box_batch: Per-image ``[x1, y1, x2, y2]`` boxes.
+            multimask_output: Whether to return multiple masks per image.
+
+        Returns:
+            One :class:`ConceptPrediction` per input image.
+        """
+        return self.concept_segmenter.segment_batch(
+            images,
+            points_batch=points_batch,
+            labels_batch=labels_batch,
+            box_batch=box_batch,
+            multimask_output=multimask_output,
+        )
+
+    def to_image_prediction(self, prediction: ConceptPrediction) -> ImagePrediction:
+        """Convert a concept prediction to an :class:`ImagePrediction`.
+
+        Useful for code written against the SAM 2 result type: it drops the
+        boxes and the ``concept`` label and keeps the masks.
+
+        Args:
+            prediction: The concept prediction to convert.
+
+        Returns:
+            The equivalent :class:`ImagePrediction`.
+        """
+        return self.concept_segmenter.to_image_prediction(prediction)
+
     # ------------------------------------------------------------------
     # Save
     # ------------------------------------------------------------------
 
     def save(
         self,
-        result: ConceptPrediction,
+        result: ConceptPrediction | ImagePrediction,
         output_dir: str | Path,
         *,
         fmt: str = "png",
     ) -> Path:
-        """Save a concept prediction to disk.
+        """Save a concept or image prediction to disk.
 
         Args:
-            result: The prediction to save.
+            result: The prediction to save. :class:`ConceptPrediction` writes
+                the instance masks plus its metadata; :class:`ImagePrediction`
+                writes the plain masks.
             output_dir: Target directory.
             fmt: ``"png"``, ``"npy"``, or ``"coco_rle"``.
 
         Returns:
             Path to the output directory.
         """
+        if isinstance(result, ImagePrediction):
+            from lazysammy.io import save_image_prediction
+
+            return save_image_prediction(result, output_dir, fmt=fmt)
         return self.concept_segmenter.save(result, output_dir, fmt=fmt)
 
     # ------------------------------------------------------------------
