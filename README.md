@@ -273,7 +273,26 @@ session.save_overlay("output/tracked.mp4")
 ```
 
 The geometric-prompt API is unchanged, so `SAM3` is a drop-in for `SAM2` when
-you only need points, boxes, and masks.
+you only need points, boxes, and masks. In fact **every SAM 2 image feature is
+available on `SAM3`** - the convenience shortcuts, multi-object helpers,
+refinement, and batching all work exactly as they do on `SAM2`:
+
+```python
+sam = SAM3()
+
+pred = sam.segment("photo.jpg", points=[[100, 200]], labels=[1])
+pred = sam.segment_point("photo.jpg", x=100, y=200)
+pred = sam.segment_box("photo.jpg", 50, 60, 300, 400)
+
+preds = sam.segment_multi_box("photo.jpg", [[50, 60, 300, 400], [400, 100, 600, 350]])
+preds = sam.segment_multi_point("photo.jpg", [[[100, 200]], [[400, 300]]])
+preds = sam.segment_batch(["a.jpg", "b.jpg"], box_batch=[[50, 60, 300, 400], None])
+
+refined = sam.refine("photo.jpg", pred.best_mask.logits, points=[[120, 180]], labels=[0])
+
+# Concept results can be bridged to the SAM 2 result shape
+image_pred = sam.to_image_prediction(pred)  # drops boxes + concept label
+```
 
 ---
 
@@ -342,19 +361,24 @@ session.reset()                                     # start over
 
 | Area | Call | Returns |
 |------|------|---------|
-| Image segmentation | `sam.segment(...)` | `ImagePrediction` |
-| Batched images | `sam.segment_batch([...])` | `list[ImagePrediction]` |
-| Many prompts, one image | `sam.set_image(...)` + `sam.predict(...)` | `ImagePrediction` |
-| Multiple objects by points | `sam.segment_multi_point(...)` | `list[ImagePrediction]` |
-| Refinement | `sam.refine(...)` | `ImagePrediction` |
-| Auto-segmentation | `sam.auto_segment(...)` | `AutoMaskResult` |
+| Image segmentation | `sam.segment(...)` | `ImagePrediction` / `ConceptPrediction` |
+| Batched images | `sam.segment_batch([...])` | `list[...]` |
+| Many prompts, one image | `sam.set_image(...)` + `sam.predict(...)` | `ImagePrediction` / `ConceptPrediction` |
+| Multiple objects by points | `sam.segment_multi_point(...)` | `list[...]` |
+| Refinement | `sam.refine(...)` | `ImagePrediction` / `ConceptPrediction` |
+| Auto-segmentation (SAM 2) | `sam.auto_segment(...)` | `AutoMaskResult` |
 | Concept segmentation (SAM 3) | `sam.segment_text(image, text)` | `ConceptPrediction` |
 | Exemplar segmentation (SAM 3) | `sam.segment_exemplar(image, box)` | `ConceptPrediction` |
+| Bridge to SAM 2 result (SAM 3) | `sam.to_image_prediction(pred)` | `ImagePrediction` |
 | Start a video session | `sam.video(...)` | `VideoSession` |
 | Propagate | `session.propagate(...)` | `VideoResults` |
 | Track a concept (SAM 3) | `session.add_text(frame_idx, text)` | `FrameMasks` |
 | Save any image result | `sam.save(result, dir, fmt=...)` | output path |
 | Save video results | `session.save(dir, fmt=...)` | output path |
+
+`ImagePrediction` / `ConceptPrediction` above denote the same call on `SAM2` and
+`SAM3` respectively: SAM 3 supports the full SAM 2 image surface, returning its
+own `ConceptPrediction` result type.
 
 ---
 

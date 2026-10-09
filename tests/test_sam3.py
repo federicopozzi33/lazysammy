@@ -37,6 +37,13 @@ class _StubProcessor:
         self.calls.append(("set_image", image.shape))
         return {"original_height": image.shape[0], "original_width": image.shape[1]}
 
+    def set_image_batch(self, images: list[np.ndarray]) -> dict[str, Any]:
+        self.calls.append(("set_image_batch", len(images)))
+        return {
+            "original_heights": [im.shape[0] for im in images],
+            "original_widths": [im.shape[1] for im in images],
+        }
+
     def set_text_prompt(self, *, state: dict[str, Any], prompt: str) -> dict[str, Any]:
         self.calls.append(("set_text_prompt", prompt))
         return self._with_detections(state, concept=prompt)
@@ -84,6 +91,15 @@ class _StubImageModel:
         masks = np.ones((1, 8, 8), dtype=bool)
         scores = np.array([0.8], dtype=np.float32)
         return masks, scores, None
+
+    def predict_inst_batch(
+        self, state: Any, points_batch: Any, labels_batch: Any, **kwargs: Any
+    ) -> tuple[list[np.ndarray], list[np.ndarray], list[None]]:
+        self.calls.append(("predict_inst_batch", kwargs))
+        batch_size = len(state["original_heights"])
+        masks = [np.ones((1, 8, 8), dtype=bool) for _ in range(batch_size)]
+        scores = [np.array([0.8], dtype=np.float32) for _ in range(batch_size)]
+        return masks, scores, [None] * batch_size
 
 
 @pytest.fixture
@@ -250,6 +266,97 @@ class TestConceptSegmenter:
 
 
 # ---------------------------------------------------------------------------
+# SAM 2 image-feature parity
+# ---------------------------------------------------------------------------
+
+
+class TestSAM2Parity:
+    """SAM 3 exposes every SAM 2 image feature, through the shared mixin."""
+
+    def test_segment_point_runs_interactive_predictor(
+        self, stub_concept_segmenter: ConceptSegmenter
+    ) -> None:
+        image = np.zeros((8, 8, 3), dtype=np.uint8)
+        pred = stub_concept_segmenter.segment_point(image, 4, 4)
+        assert len(pred) == 1
+        assert pred.masks[0].score == pytest.approx(0.8)
+
+    def test_segment_box_passes_single_box(self, stub_concept_segmenter: ConceptSegmenter) -> None:
+        image = np.zeros((8, 8, 3), dtype=np.uint8)
+        stub_concept_segmenter.segment_box(image, 0, 0, 4, 4)
+        call = next(c for c in stub_concept_segmenter.model.calls if c[0] == "predict_inst")
+        assert call[1]["box"].shape == (1, 4)
+
+    def test_segment_multi_box_returns_one_per_box(
+        self, stub_concept_segmenter: ConceptSegmenter
+    ) -> None:
+        image = np.zeros((8, 8, 3), dtype=np.uint8)
+        preds = stub_concept_segmenter.segment_multi_box(image, [[0, 0, 4, 4], [1, 1, 5, 5]])
+        assert len(preds) == 2
+        assert all(isinstance(p, ConceptPrediction) for p in preds)
+
+    def test_segment_multi_box_empty(self, stub_concept_segmenter: ConceptSegmenter) -> None:
+        assert stub_concept_segmenter.segment_multi_box("photo.jpg", []) == []
+
+    def test_segment_multi_point_returns_one_per_object(
+        self, stub_concept_segmenter: ConceptSegmenter
+    ) -> None:
+        image = np.zeros((8, 8, 3), dtype=np.uint8)
+        preds = stub_concept_segmenter.segment_multi_point(image, [[[1, 1]], [[2, 2]]])
+        assert len(preds) == 2
+
+    def test_segment_multi_point_rejects_mismatched_labels(
+        self, stub_concept_segmenter: ConceptSegmenter
+    ) -> None:
+        image = np.zeros((8, 8, 3), dtype=np.uint8)
+        with pytest.raises(ValueError, match="same length"):
+            stub_concept_segmenter.segment_multi_point(
+                image, [[[1, 1]], [[2, 2]]], labels_per_object=[[1]]
+            )
+
+    def test_refine_uses_previous_logits(self, stub_concept_segmenter: ConceptSegmenter) -> None:
+        image = np.zeros((8, 8, 3), dtype=np.uint8)
+        pred = stub_concept_segmenter.refine(image, np.zeros((16, 16), dtype=np.float32))
+        assert len(pred) == 1
+        call = next(c for c in stub_concept_segmenter.model.calls if c[0] == "predict_inst")
+        assert call[1]["mask_input"].shape == (1, 16, 16)
+
+    def test_refine_rejects_bad_ndim(self, stub_concept_segmenter: ConceptSegmenter) -> None:
+        with pytest.raises(ValueError, match="mask-logit"):
+            stub_concept_segmenter.refine("photo.jpg", np.zeros((1, 2, 3, 4), dtype=np.float32))
+
+    def test_segment_batch_encodes_all_images(
+        self, stub_concept_segmenter: ConceptSegmenter
+    ) -> None:
+        images = [np.zeros((8, 8, 3), dtype=np.uint8) for _ in range(2)]
+        preds = stub_concept_segmenter.segment_batch(images, box_batch=[[0, 0, 4, 4], None])
+        assert len(preds) == 2
+        assert ("set_image_batch", 2) in stub_concept_segmenter.processor.calls
+        assert stub_concept_segmenter.model.calls[0][0] == "predict_inst_batch"
+
+    def test_segment_batch_rejects_length_mismatch(
+        self, stub_concept_segmenter: ConceptSegmenter
+    ) -> None:
+        images = [np.zeros((8, 8, 3), dtype=np.uint8) for _ in range(2)]
+        with pytest.raises(ValueError, match="length 2"):
+            stub_concept_segmenter.segment_batch(images, box_batch=[[0, 0, 4, 4]])
+
+    def test_to_image_prediction_bridges_result_types(
+        self, stub_concept_segmenter: ConceptSegmenter
+    ) -> None:
+        concept = ConceptPrediction(
+            masks=[Mask(data=np.ones((4, 4), dtype=bool), score=0.5)],
+            boxes=[[0, 0, 4, 4]],
+            concept="cat",
+            image_shape=(4, 4),
+        )
+        image_pred = stub_concept_segmenter.to_image_prediction(concept)
+        assert image_pred.image_shape == (4, 4)
+        assert len(image_pred) == 1
+        assert image_pred.best_mask.score == pytest.approx(0.5)
+
+
+# ---------------------------------------------------------------------------
 # SAM3 facade
 # ---------------------------------------------------------------------------
 
@@ -278,6 +385,34 @@ class _StubConceptSegmenter:
     def predict(self, **kwargs: Any) -> ConceptPrediction:
         self.calls.append(("predict", kwargs))
         return ConceptPrediction(masks=[])
+
+    def segment_point(self, image: Any, x: float, y: float, **kwargs: Any) -> ConceptPrediction:
+        self.calls.append(("segment_point", {"x": x, "y": y, **kwargs}))
+        return ConceptPrediction(masks=[])
+
+    def segment_box(self, image: Any, x1: float, y1: float, x2: float, y2: float) -> Any:
+        self.calls.append(("segment_box", {"box": [x1, y1, x2, y2]}))
+        return ConceptPrediction(masks=[])
+
+    def segment_multi_box(self, image: Any, boxes: Any) -> list[ConceptPrediction]:
+        self.calls.append(("segment_multi_box", {"n": len(boxes)}))
+        return []
+
+    def segment_multi_point(self, image: Any, points_per_object: Any, **kwargs: Any) -> Any:
+        self.calls.append(("segment_multi_point", {"n": len(points_per_object)}))
+        return []
+
+    def refine(self, image: Any, previous_logits: Any, **kwargs: Any) -> ConceptPrediction:
+        self.calls.append(("refine", kwargs))
+        return ConceptPrediction(masks=[])
+
+    def segment_batch(self, images: Any, **kwargs: Any) -> list[ConceptPrediction]:
+        self.calls.append(("segment_batch", {"n": len(images)}))
+        return []
+
+    def to_image_prediction(self, prediction: Any) -> Any:
+        self.calls.append(("to_image_prediction", {}))
+        return prediction
 
     def save(self, result: Any, output_dir: Any, **kwargs: Any) -> Path:
         self.calls.append(("save", kwargs))
@@ -325,6 +460,45 @@ class TestSAM3Facade:
         sam.predict(points=[[1, 1]], labels=[1])
         names = [c[0] for c in sam._concept_segmenter.calls]  # type: ignore[union-attr]
         assert names == ["set_image", "predict"]
+
+    def test_segment_point_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sam = _stubbed_sam(monkeypatch)
+        sam.segment_point("photo.jpg", 4, 5, foreground=False)
+        name, kwargs = sam._concept_segmenter.calls[0]  # type: ignore[union-attr]
+        assert name == "segment_point"
+        assert kwargs["x"] == 4
+        assert kwargs["y"] == 5
+        assert kwargs["foreground"] is False
+
+    def test_segment_box_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sam = _stubbed_sam(monkeypatch)
+        sam.segment_box("photo.jpg", 0, 0, 4, 4)
+        name, kwargs = sam._concept_segmenter.calls[0]  # type: ignore[union-attr]
+        assert name == "segment_box"
+        assert kwargs["box"] == [0, 0, 4, 4]
+
+    def test_multi_helpers_delegate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sam = _stubbed_sam(monkeypatch)
+        sam.segment_multi_box("photo.jpg", [[0, 0, 4, 4], [1, 1, 5, 5]])
+        sam.segment_multi_point("photo.jpg", [[[1, 1]], [[2, 2]]])
+        names = [c[0] for c in sam._concept_segmenter.calls]  # type: ignore[union-attr]
+        assert names == ["segment_multi_box", "segment_multi_point"]
+
+    def test_refine_and_batch_delegate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sam = _stubbed_sam(monkeypatch)
+        sam.refine("photo.jpg", np.zeros((16, 16), dtype=np.float32))
+        sam.segment_batch(["a.jpg", "b.jpg"])
+        names = [c[0] for c in sam._concept_segmenter.calls]  # type: ignore[union-attr]
+        assert names == ["refine", "segment_batch"]
+
+    def test_save_accepts_image_prediction(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from lazysammy.types import ImagePrediction
+
+        sam = _stubbed_sam(monkeypatch)
+        out = sam.save(ImagePrediction(masks=[]), "out/", fmt="npy")
+        assert str(out).endswith("out")
+        # Image predictions are saved without touching the concept segmenter.
+        assert sam._concept_segmenter.calls == []  # type: ignore[union-attr]
 
     def test_video_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sam = _stubbed_sam(monkeypatch)

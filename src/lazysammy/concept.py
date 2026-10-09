@@ -4,15 +4,18 @@ SAM 3 extends SAM 2's geometric prompting (points, boxes, masks) with
 *concept* prompts: a short text phrase or an image exemplar. Given a concept,
 SAM 3 exhaustively detects and segments every matching instance in an image.
 
-This module wraps ``Sam3Processor`` with the same shape of API as
-:class:`~lazysammy.image.ImageSegmenter`, so the two are interchangeable for
-the geometric-prompt case, while :meth:`ConceptSegmenter.segment_text` and
-:meth:`ConceptSegmenter.segment_exemplar` expose the new concept features.
+:class:`ConceptSegmenter` exposes the same image API as
+:class:`~lazysammy.image.ImageSegmenter` - geometric prompts, convenience
+shortcuts, multi-object helpers, refinement, and batching, all through the
+shared :class:`~lazysammy.geometric.GeometricPromptMixin` - so it is a drop-in
+replacement. On top of that it adds :meth:`segment_text`,
+:meth:`segment_exemplar`, and :meth:`to_image_prediction`.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,10 +23,11 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from lazysammy.geometric import GeometricPromptMixin
+from lazysammy.geometric import GeometricPromptMixin, build_masks
 from lazysammy.types import (
     BoundingBox,
     ConceptPrediction,
+    ImagePrediction,
     Mask,
     MaskLogits,
     PointCoords,
@@ -39,7 +43,7 @@ from lazysammy.validation import (
 logger = logging.getLogger(__name__)
 
 
-class ConceptSegmenter(GeometricPromptMixin):
+class ConceptSegmenter(GeometricPromptMixin[ConceptPrediction]):
     """Open-vocabulary image segmentation powered by SAM 3.
 
     Example::
@@ -124,78 +128,72 @@ class ConceptSegmenter(GeometricPromptMixin):
         """Store the SAM 3 processor state for *img*."""
         self._state = self._processor.set_image(img)
 
+    def _set_image_embedding_batch(self, imgs: Sequence[npt.NDArray[np.uint8]]) -> None:
+        """Store the SAM 3 processor state for a batch of images."""
+        self._state = self._processor.set_image_batch(list(imgs))
+
     def reset(self) -> None:
         """Clear all prompts and results for the current image."""
         if self._state is not None:
             self._processor.reset_all_prompts(self._state)
 
     # ------------------------------------------------------------------
-    # Concept prompts (SAM 3 new features)
+    # Core prediction
     # ------------------------------------------------------------------
 
-    def segment_text(
-        self,
-        image: str | Path | npt.NDArray[np.uint8],
-        text: str,
-        *,
-        confidence_threshold: float | None = None,
-    ) -> ConceptPrediction:
-        """Segment every instance of a text concept in an image.
+    def _wrap_masks(self, masks: list[Mask], image_shape: tuple[int, int]) -> ConceptPrediction:
+        """Wrap predicted masks in a :class:`ConceptPrediction`.
 
-        Args:
-            image: File path or ``(H, W, 3)`` RGB uint8 array.
-            text: A short noun phrase, e.g. ``"a player in white"``.
-            confidence_threshold: Override the default score threshold.
-
-        Returns:
-            A :class:`ConceptPrediction` with one mask per detected instance.
+        Geometric prompts produce masks without bounding boxes, so ``boxes``
+        stays empty here; the concept paths fill it in via
+        :meth:`_to_prediction`.
         """
-        image_shape = self._ensure_image(image)
-        if confidence_threshold is not None:
-            # Set the threshold without a state so the processor does not
-            # re-run grounding on the previous results; the text prompt below
-            # runs grounding once with the new threshold.
-            self._processor.set_confidence_threshold(confidence_threshold)
-        with torch.inference_mode(), autocast(self._device):
-            state = self._processor.set_text_prompt(state=self._state, prompt=text)
-        return self._to_prediction(state, concept=text, image_shape=image_shape)
+        return ConceptPrediction(masks=masks, image_shape=image_shape)
 
-    def segment_exemplar(
+    def _run_geometric(
         self,
-        image: str | Path | npt.NDArray[np.uint8],
-        box: BoundingBox,
         *,
-        label: bool = True,
-        confidence_threshold: float | None = None,
-    ) -> ConceptPrediction:
-        """Segment every instance matching a box exemplar.
+        points: npt.NDArray[np.float32] | None,
+        labels: npt.NDArray[np.int32] | None,
+        box: npt.NDArray[np.float32] | None,
+        mask_input: npt.NDArray[np.floating[Any]] | None,
+        multimask_output: bool,
+        return_logits: bool,
+    ) -> tuple[npt.NDArray[Any], npt.NDArray[Any], npt.NDArray[Any] | None]:
+        """Run the SAM 3 interactive predictor on already-normalized prompts."""
+        bx = box[None, :] if box is not None else None
+        result = self._model.predict_inst(
+            self._state,
+            point_coords=points,
+            point_labels=labels,
+            box=bx,
+            mask_input=mask_input,
+            multimask_output=multimask_output,
+            return_logits=return_logits,
+        )
+        return cast("tuple[npt.NDArray[Any], npt.NDArray[Any], npt.NDArray[Any] | None]", result)
 
-        The box is a *visual exemplar*: SAM 3 finds all objects similar to the
-        one inside it, rather than segmenting only that box.
-
-        Args:
-            image: File path or ``(H, W, 3)`` RGB uint8 array.
-            box: ``[x1, y1, x2, y2]`` exemplar box in absolute pixels.
-            label: ``True`` for a positive exemplar, ``False`` to exclude.
-            confidence_threshold: Override the default score threshold.
-
-        Returns:
-            A :class:`ConceptPrediction` with one mask per matched instance.
-        """
-        image_shape = self._ensure_image(image)
-        if confidence_threshold is not None:
-            # Set the threshold without a state so the processor does not
-            # re-run grounding on the previous results; the geometric prompt
-            # below runs grounding once with the new threshold.
-            self._processor.set_confidence_threshold(confidence_threshold)
-        cxcywh = self._to_normalized_cxcywh(box, image_shape)
-        with torch.inference_mode(), autocast(self._device):
-            state = self._processor.add_geometric_prompt(box=cxcywh, label=label, state=self._state)
-        return self._to_prediction(state, concept="visual", image_shape=image_shape)
-
-    # ------------------------------------------------------------------
-    # Geometric prompts (SAM 1/2 task, via the interactive predictor)
-    # ------------------------------------------------------------------
+    def _run_geometric_batch(
+        self,
+        *,
+        points_batch: list[npt.NDArray[np.float32] | None],
+        labels_batch: list[npt.NDArray[np.int32] | None],
+        box_batch: list[npt.NDArray[np.float32] | None],
+        multimask_output: bool,
+    ) -> tuple[list[npt.NDArray[Any]], list[npt.NDArray[Any]], list[npt.NDArray[Any] | None]]:
+        """Run the SAM 3 batch predictor on already-normalized prompts."""
+        boxes = [b[None, :] if b is not None else None for b in box_batch]
+        result = self._model.predict_inst_batch(
+            self._state,
+            points_batch,
+            labels_batch,
+            box_batch=boxes,
+            multimask_output=multimask_output,
+        )
+        return cast(
+            "tuple[list[npt.NDArray[Any]], list[npt.NDArray[Any]], list[npt.NDArray[Any] | None]]",
+            result,
+        )
 
     def segment(
         self,
@@ -294,28 +292,83 @@ class ConceptSegmenter(GeometricPromptMixin):
         )
         return ConceptPrediction(masks=masks, image_shape=image_shape)
 
-    def _run_geometric(
+    # ------------------------------------------------------------------
+    # Concept prompts (SAM 3 new features)
+    # ------------------------------------------------------------------
+
+    def segment_text(
         self,
+        image: str | Path | npt.NDArray[np.uint8],
+        text: str,
         *,
-        points: npt.NDArray[np.float32] | None,
-        labels: npt.NDArray[np.int32] | None,
-        box: npt.NDArray[np.float32] | None,
-        mask_input: npt.NDArray[np.floating[Any]] | None,
-        multimask_output: bool,
-        return_logits: bool,
-    ) -> tuple[npt.NDArray[Any], npt.NDArray[Any], npt.NDArray[Any] | None]:
-        """Run the SAM 3 interactive predictor on already-normalized prompts."""
-        bx = box[None, :] if box is not None else None
-        result = self._model.predict_inst(
-            self._state,
-            point_coords=points,
-            point_labels=labels,
-            box=bx,
-            mask_input=mask_input,
-            multimask_output=multimask_output,
-            return_logits=return_logits,
-        )
-        return cast("tuple[npt.NDArray[Any], npt.NDArray[Any], npt.NDArray[Any] | None]", result)
+        confidence_threshold: float | None = None,
+    ) -> ConceptPrediction:
+        """Segment every instance of a text concept in an image.
+
+        Args:
+            image: File path or ``(H, W, 3)`` RGB uint8 array.
+            text: A short noun phrase, e.g. ``"a player in white"``.
+            confidence_threshold: Override the default score threshold.
+
+        Returns:
+            A :class:`ConceptPrediction` with one mask per detected instance.
+        """
+        image_shape = self._ensure_image(image)
+        if confidence_threshold is not None:
+            # Set the threshold without a state so the processor does not
+            # re-run grounding on the previous results; the text prompt below
+            # runs grounding once with the new threshold.
+            self._processor.set_confidence_threshold(confidence_threshold)
+        with torch.inference_mode(), autocast(self._device):
+            state = self._processor.set_text_prompt(state=self._state, prompt=text)
+        return self._to_prediction(state, concept=text, image_shape=image_shape)
+
+    def segment_exemplar(
+        self,
+        image: str | Path | npt.NDArray[np.uint8],
+        box: BoundingBox,
+        *,
+        label: bool = True,
+        confidence_threshold: float | None = None,
+    ) -> ConceptPrediction:
+        """Segment every instance matching a box exemplar.
+
+        The box is a *visual exemplar*: SAM 3 finds all objects similar to the
+        one inside it, rather than segmenting only that box.
+
+        Args:
+            image: File path or ``(H, W, 3)`` RGB uint8 array.
+            box: ``[x1, y1, x2, y2]`` exemplar box in absolute pixels.
+            label: ``True`` for a positive exemplar, ``False`` to exclude.
+            confidence_threshold: Override the default score threshold.
+
+        Returns:
+            A :class:`ConceptPrediction` with one mask per matched instance.
+        """
+        image_shape = self._ensure_image(image)
+        if confidence_threshold is not None:
+            # Set the threshold without a state so the processor does not
+            # re-run grounding on the previous results; the geometric prompt
+            # below runs grounding once with the new threshold.
+            self._processor.set_confidence_threshold(confidence_threshold)
+        cxcywh = self._to_normalized_cxcywh(box, image_shape)
+        with torch.inference_mode(), autocast(self._device):
+            state = self._processor.add_geometric_prompt(box=cxcywh, label=label, state=self._state)
+        return self._to_prediction(state, concept="visual", image_shape=image_shape)
+
+    # ------------------------------------------------------------------
+    # Result conversion
+    # ------------------------------------------------------------------
+
+    def to_image_prediction(self, prediction: ConceptPrediction) -> ImagePrediction:
+        """Convert a concept prediction into an :class:`ImagePrediction`.
+
+        The two result types are lossy in opposite directions: concept
+        predictions carry boxes, image predictions carry logits. This bridges
+        them for code that only understands the SAM 2 result shape, dropping
+        the boxes and the ``concept`` label.
+        """
+        return ImagePrediction(masks=list(prediction.masks), image_shape=prediction.image_shape)
 
     # ------------------------------------------------------------------
     # Internal
@@ -356,12 +409,8 @@ class ConceptSegmenter(GeometricPromptMixin):
         scores = np.asarray(state["scores"], dtype=np.float32).reshape(-1)
         boxes = np.asarray(state["boxes"], dtype=np.float32).reshape(-1, 4)
 
-        masks = [
-            Mask(data=masks_np[i].astype(bool), score=float(scores[i]))
-            for i in range(len(masks_np))
-        ]
         return ConceptPrediction(
-            masks=masks,
+            masks=build_masks(masks_np, scores, None),
             boxes=[[float(v) for v in box] for box in boxes],
             concept=concept,
             image_shape=image_shape,
